@@ -1,0 +1,85 @@
+{
+  "name": "violentmonkey",
+  "description": "Violentmonkey",
+  "version": "2.14.0",
+  "scripts": {
+    "prepare": "husky install",
+    "dev": "gulp dev",
+    "prebuild": "yarn ci",
+    "build": "cross-env NODE_ENV=production gulp build",
+    "build:selfHosted": "cross-env TARGET=selfHosted BETA=1 run-s build",
+    "analyze": "cross-env RUN_ENV=analyze run-s build",
+    "i18n": "gulp i18n",
+    "copyI18n": "gulp copyI18n",
+    "lint": "run-s lint:js lint:yml",
+    "lint:js": "eslint --ext .js,.vue . --cache",
+    "lint:yml": "gulp check",
+    "svgo": "plaid svgo",
+    "test": "cross-env BABEL_ENV=test TEST=test jest test",
+    "ci": "run-p lint test",
+    "bumpVersion": "gulp bump",
+    "bump": "run-s ci \"bumpVersion --commit\"",
+    "preversion": "run-s ci \"bumpVersion --reset\""
+  },
+  "devDependencies": {
+    "@actions/core": "^1.9.0",
+    "@actions/github": "^5.0.3",
+    "@babel/helper-plugin-utils": "^7.18.6",
+    "@babel/plugin-syntax-function-bind": "^7.18.6",
+    "@gera2ld/plaid": "~2.5.6",
+    "@gera2ld/plaid-common-ts": "~2.5.1",
+    "@gera2ld/plaid-test": "~2.5.8",
+    "@gera2ld/plaid-webpack": "~2.5.7",
+    "@gera2ld/plaid-webpack-vue3": "~2.5.7",
+    "@types/chrome": "^0.0.208",
+    "@types/firefox-webext-browser": "94.0.1",
+    "@violentmonkey/types": "0.1.5",
+    "amo-upload": "^0.4.0",
+    "babel-plugin-transform-modern-regexp": "^0.0.6",
+    "cross-env": "^7.0.3",
+    "cross-spawn": "^7.0.3",
+    "del": "^6.1.1",
+    "fancy-log": "^2.0.0",
+    "gulp": "^4.0.2",
+    "gulp-plumber": "^1.1.0",
+    "husky": "^8.0.1",
+    "jest-environment-jsdom": "^29.0.3",
+    "js-yaml": "^4.1.0",
+    "node-fetch": "^3.2.10",
+    "plugin-error": "^2.0.0",
+    "postcss-scss": "^4.0.4",
+    "postcss-simple-vars": "^6.0.3",
+    "sharp": "^0.31.0",
+    "through2": "^4.0.2",
+    "vinyl": "^2.2.1",
+    "wrapper-webpack-plugin": "2.2.2"
+  },
+  "author": "Gerald <i@gerald.top>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/violentmonkey/violentmonkey.git"
+  },
+  "bugs": {
+    "url": "https://github.com/violentmonkey/violentmonkey/issues"
+  },
+  "homepage": "https://github.com/violentmonkey/violentmonkey",
+  "license": "MIT",
+  "dependencies": {
+    "@violentmonkey/shortcut": "^1.2.6",
+    "@zip.js/zip.js": "2.4.4",
+    "codemirror": "^5.65.10",
+    "tldjs": "^2.3.1",
+    "vue": "^3.2.45",
+    "vueleton": "^2.0.1"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "jest": {
+    "setupFilesAfterEnv": [
+      "./test/mock/index.js"
+    ],
+    "testEnvironment": "./test/mock/env.js"
+  },
+  "beta": 1
+}
