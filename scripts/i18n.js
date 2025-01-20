@@ -56,6 +56,7 @@ class Locale {
     if (extension === '.json') {
       if (stripDescriptions) {
         data = Object.entries(data).reduce((res, [key, value]) => {
+          // eslint-disable-next-line no-unused-vars
           const { description, ...stripped } = value;
           res[key] = stripped;
           return res;
@@ -106,12 +107,18 @@ class Locales {
     options = options || {};
     const data = {};
     const langData = this.locales[lang];
-    const defaultData = options.useDefaultLang && lang != this.defaultLang && this.locales[this.defaultLang];
+    const defaultData = options.useDefaultLang && lang !== this.defaultLang
+      ? this.locales[this.defaultLang]
+      : null;
+    const colons = defaultData && !/^(ja|ko|zh)/.test(lang);
     Object.keys(this.data).forEach(key => {
       if (options.touchedOnly && !this.data[key].touched) return;
+      const msg = langData.getMessage(key) || defaultData?.getMessage(key) || '';
       data[key] = {
         description: this.data[key].description || this.newLocaleItem,
-        message: langData.getMessage(key) || defaultData && defaultData.getMessage(key) || '',
+        message: colons
+          ? normalizeTrailingColon(msg, defaultData.getMessage(key))
+          : msg,
       };
       if (options.markUntouched && !this.data[key].touched) data[key].touched = false;
     });
@@ -142,7 +149,7 @@ function extract(options) {
     default: ['\\b(?:i18n\\(\'|i18n-key=")(\\w+)[\'"]', 1],
     json: ['__MSG_(\\w+)__', 1],
   };
-  const types = {
+  const typePatternMap = {
     '.js': 'default',
     '.json': 'json',
     '.html': 'default',
@@ -158,7 +165,7 @@ function extract(options) {
       const pattern = new RegExp(patternData[0], 'g');
       const groupId = patternData[1];
       let groups;
-      while (groups = pattern.exec(data)) {
+      while ((groups = pattern.exec(data))) {
         keys.add(groups[groupId]);
       }
     });
@@ -168,7 +175,7 @@ function extract(options) {
     if (file.isNull()) return cb();
     if (file.isStream()) return this.emit('error', new PluginError('VM-i18n', 'Stream is not supported.'));
     const extname = path.extname(file.path);
-    const type = types[extname];
+    const type = typePatternMap[extname];
     if (type) extractFile(file.contents, type);
     cb();
   }
@@ -194,6 +201,10 @@ function extract(options) {
     .catch(cb);
   }
 
+  if (options.manifest) {
+    const mf = require('fs').readFileSync(options.manifest, 'utf8');
+    extractFile(mf, 'json');
+  }
   return through.obj(bufferContents, endStream);
 }
 
@@ -201,6 +212,16 @@ function read(options) {
   const stream = extract(options);
   process.nextTick(() => stream.end());
   return stream;
+}
+
+function normalizeTrailingColon(str, sourceStr = '') {
+  if (sourceStr.endsWith(': ') && str.endsWith(':')) {
+    return str + ' ';
+  }
+  if (sourceStr.endsWith(':') && str.endsWith(': ')) {
+    return str.slice(0, -1);
+  }
+  return str;
 }
 
 module.exports = {

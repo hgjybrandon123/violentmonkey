@@ -1,37 +1,50 @@
-import bridge, { addHandlers } from './bridge';
-import store from './store';
+import bridge, { addHandlers, callbacks } from './bridge';
+import { commands, storages } from './store';
+import { GM_API_CTX } from './gm-api';
 import { makeGmApiWrapper } from './gm-api-wrapper';
 import './gm-values';
 import './notifications';
 import './requests';
 import './tabs';
-import { bindEvents } from '../util';
+import { bindEvents, CONSOLE_METHODS } from '../util';
+import { safeConcat } from './util';
 
 // Make sure to call safe::methods() in code that may run after userscripts
 
 const toRun = createNullObj();
 
-export default function initialize(invokeHost) {
+export default function initialize(invokeHost, console) {
   if (PAGE_MODE_HANDSHAKE) {
     window::on(PAGE_MODE_HANDSHAKE + '*', e => {
       e = e::getDetail();
       bindEvents(e[0], e[1], bridge);
     }, { __proto__: null, once: true, capture: true });
     window::fire(new SafeCustomEvent(PAGE_MODE_HANDSHAKE));
-    bridge.mode = INJECT_PAGE;
+    bridge.mode = PAGE;
     addHandlers({
       /** @this {Node} contentWindow */
       WriteVault(id) {
         this[id] = VAULT;
       },
     });
+    /* Can't use a detached `console` in Chrome 109+ due to https://crrev.com/1063194 */
+    if (!IS_FIREFOX) {
+      for (const m of CONSOLE_METHODS) {
+        logging[m] = (...args) => bridge.post('Log', [m, args]);
+      }
+      /** @this {GMContext} */
+      GM_API_CTX.GM_log = function (...args) {
+        bridge.post('Log', ['log', safeConcat([`[${this.displayName}]`], args)]);
+      };
+    }
   } else {
-    bridge.mode = INJECT_CONTENT;
+    bridge.mode = CONTENT;
     bridge.post = (cmd, data, node) => {
-      invokeHost({ cmd, data, node }, INJECT_CONTENT);
+      invokeHost({ cmd, data, node }, CONTENT);
     };
     global.chrome = undefined;
     global.browser = undefined;
+    logging = console; // eslint-disable-line no-global-assign
     return (cmd, data, realm, node) => {
       if (process.env.DEBUG) console.info('[bridge.guest.content] received', { cmd, data, node });
       bridge.onHandle({ cmd, data, node });
@@ -40,15 +53,18 @@ export default function initialize(invokeHost) {
 }
 
 addHandlers({
-  Command({ id, cap, evt }) {
-    const constructor = evt.key ? SafeKeyboardEvent : SafeMouseEvent;
-    const fn = store.commands[`${id}:${cap}`];
-    if (fn) fn(new constructor(evt.type, evt));
+  Command({ id, key, evt }) {
+    commands[id]?.[key]?.cb(
+      new (evt.key ? SafeKeyboardEvent : SafeMouseEvent)(
+        evt.type, evt
+      )
+    );
   },
   /** @this {Node} */
   Callback({ id, data }) {
-    const fn = bridge.callbacks[id];
-    delete bridge.callbacks[id];
+    if (id === 'Error') throw data;
+    const fn = callbacks[id];
+    delete callbacks[id];
     if (fn) this::fn(data);
   },
   async Plant({ data: dataKey, win: winKey }) {
@@ -71,7 +87,7 @@ addHandlers({
     for (const script of items) {
       const { key } = script;
       toRun[key.data] = script;
-      store.values[script.id] = nullObjFrom(script[INJECT_VAL]);
+      storages[script.id] = setPrototypeOf(script[VALUES] || {}, null);
       if (!PAGE_MODE_HANDSHAKE) {
         const winKey = key.win;
         const data = window[winKey];
@@ -79,7 +95,8 @@ addHandlers({
           safePush(toRunNow, data);
           delete window[winKey];
         } else {
-          safeDefineProperty(window, winKey, {
+          defineProperty(window, winKey, {
+            __proto__: null,
             configurable: true,
             set: onCodeSet,
           });
@@ -87,13 +104,17 @@ addHandlers({
       }
     }
     if (!PAGE_MODE_HANDSHAKE) toRunNow::forEach(onCodeSet);
-    else if (IS_FIREFOX) bridge.post('InjectList', items[0].runAt);
+    else if (IS_FIREFOX) bridge.post('InjectList', items[0][RUN_AT]);
   },
-  Expose() {
-    external[VIOLENTMONKEY] = {
+  Expose(allowGetScriptVer) {
+    const key = 'external';
+    const obj = window[key];
+    (isObject(obj) ? obj : (window[key] = {}))[VIOLENTMONKEY] = {
       version: process.env.VM_VER,
       isInstalled: (name, namespace) => (
-        bridge.send('GetScriptVer', { meta: { name, namespace } })
+        allowGetScriptVer
+          ? bridge.promise('GetScriptVer', { meta: { name, namespace } })
+          : promiseResolve()
       ),
     };
   },

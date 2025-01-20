@@ -87,9 +87,9 @@ export function forEachValue(func, thisObj) {
 
 export function deepCopy(src) {
   if (!src || typeof src !== 'object') return src;
-  /* Not using `map` because its result belongs to the `window` of the source,
-   * so it becomes "dead object" in Firefox after GC collects it. */
-  if (Array.isArray(src)) return Array.from(src, deepCopy);
+  // Using a literal [] instead of `src.map(deepCopy)` to avoid src `window` leaking.
+  // Using `concat` instead of `for` loop to preserve holes in the array.
+  if (Array.isArray(src)) return [].concat(src).map(deepCopy);
   return src::mapEntry(deepCopy);
 }
 
@@ -115,26 +115,50 @@ export function deepCopyDiff(src, sample) {
   if (src === sample) return;
   if (!src || typeof src !== 'object') return src;
   if (!sample || typeof sample !== 'object') return deepCopy(src);
-  if ((deepDiff = false, src = deepCopyDiffObjects(src, sample), deepDiff)) return src;
+  deepDiff = false;
+  src = (Array.isArray(src) ? deepCopyDiffArrays : deepCopyDiffObjects)(src, sample);
+  if (deepDiff) return src;
+}
+
+function deepCopyDiffArrays(src, sample) {
+  const res = [];
+  if (src.length !== sample.length) {
+    deepDiff = true;
+  }
+  for (let i = 0, a, b; i < src.length; i++) {
+    a = src[i];
+    b = sample[i];
+    if (a && typeof a === 'object') {
+      if (b && typeof b === 'object') {
+        a = (Array.isArray(a) ? deepCopyDiffArrays : deepCopyDiffObjects)(a, b);
+      } else {
+        a = deepCopy(a);
+        deepDiff = true;
+      }
+    } else if (a !== b) {
+      deepDiff = true;
+    }
+    res[i] = a;
+  }
+  return res;
 }
 
 function deepCopyDiffObjects(src, sample) {
-  const isArr = Array.isArray(src);
-  const arr1 = isArr ? src : Object.keys(src);
-  const arr2 = isArr ? sample : Object.keys(sample);
-  const res = isArr ? [] : {};
-  if (arr1.length !== arr2.length) {
-    deepDiff = true;
+  const res = {};
+  for (const key in sample) {
+    if (!hasOwnProperty(src, key)) {
+      deepDiff = true;
+      break;
+    }
   }
-  for (let i = 0, key, a, b; i < arr1.length; i += 1) {
-    key = isArr ? i : arr1[i];
-    a = src[key];
-    /* Not checking hasOwnProperty because 1) we only use own properties and
-     * 2) this can be slow for a large value storage that has thousands of keys */
-    b = sample[key];
+  for (const key in src) {
+    /* Not using Object.keys and not checking hasOwnProperty because we only use own properties,
+     * and this can be very slow for a large value storage that has thousands of keys */
+    let a = src[key];
+    let b = sample[key];
     if (a && typeof a === 'object') {
       if (b && typeof b === 'object') {
-        a = deepCopyDiffObjects(a, b);
+        a = (Array.isArray(a) ? deepCopyDiffArrays : deepCopyDiffObjects)(a, b);
       } else {
         a = deepCopy(a);
         deepDiff = true;
@@ -155,4 +179,8 @@ export function deepSize(val) {
   if (typeof val !== 'object') return `${val}`.length; // number and whatever
   if (Array.isArray(val)) return val.reduce((sum, v) => sum + 1 + deepSize(v), 2);
   return Object.keys(val).reduce((sum, k) => sum + k.length + 4 + deepSize(val[k]), 2);
+}
+
+export function nest(obj, key) {
+  return obj[key] || (obj[key] = {});
 }

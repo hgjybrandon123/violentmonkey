@@ -1,15 +1,9 @@
 import bridge, { addHandlers } from './bridge';
 import { elemByTag, makeElem, nextTask, onElement, sendCmd } from './util';
-import { bindEvents, fireBridgeEvent, META_STR } from '../util';
+import { bindEvents, CONSOLE_METHODS, fireBridgeEvent, META_STR } from '../util';
 import { Run } from './cmd-run';
 
-/* In FF, content scripts running in a same-origin frame cannot directly call parent's functions
- * so we'll use the extension's UUID, which is unique per computer in FF, for messages
- * like VAULT_WRITER to avoid interception by sites that can add listeners for all of our
- * INIT_FUNC_NAME ids even though we change it now with each release. */
-const VAULT_WRITER = `${VM_UUID}${INIT_FUNC_NAME}VW`;
-const VAULT_WRITER_ACK = `${VAULT_WRITER}+`;
-const bridgeIds = bridge.ids;
+const bridgeIds = bridge[IDS];
 let tardyQueue;
 let bridgeInfo;
 let contLists;
@@ -19,30 +13,13 @@ let pageInjectable;
 let frameEventWnd;
 /** @type {ShadowRoot} */
 let injectedRoot;
+let nonce;
 
 // https://bugzil.la/1408996
 let VMInitInjection = window[INIT_FUNC_NAME];
 /** Avoid running repeatedly due to new `documentElement` or with declarativeContent in Chrome.
  * The prop's mode is overridden to be unforgeable by a userscript in content mode. */
 setOwnProp(window, INIT_FUNC_NAME, 1, false);
-if (IS_FIREFOX) {
-  window::on(VAULT_WRITER, evt => {
-    evt::stopImmediatePropagation();
-    if (!frameEventWnd) {
-      // setupVaultId's first event is the frame's contentWindow
-      frameEventWnd = evt::getRelatedTarget();
-    } else {
-      // setupVaultId's second event is the vaultId
-      frameEventWnd::fire(new SafeCustomEvent(VAULT_WRITER_ACK, {
-        __proto__: null,
-        detail: tellBridgeToWriteVault(evt::getDetail(), frameEventWnd),
-      }));
-      frameEventWnd = null;
-    }
-  }, true);
-} else {
-  setOwnProp(global, VAULT_WRITER, tellBridgeToWriteVault, false);
-}
 
 addHandlers({
   /**
@@ -51,13 +28,35 @@ addHandlers({
   InjectList: IS_FIREFOX && injectPageList,
 });
 
-export function injectPageSandbox() {
+export function injectPageSandbox(data) {
   pageInjectable = false;
+  const VAULT_WRITER = data[kSessionId] + 'VW';
+  const VAULT_WRITER_ACK = VAULT_WRITER + '*';
   const vaultId = safeGetUniqId();
   const handshakeId = safeGetUniqId();
   const contentId = safeGetUniqId();
   const webId = safeGetUniqId();
-  if (useOpener(opener) || useOpener(!IS_TOP && parent)) {
+  nonce = data.nonce;
+  if (IS_FIREFOX) {
+    // In FF, content scripts running in a same-origin frame cannot directly call parent's functions
+    window::on(VAULT_WRITER, evt => {
+      evt::stopImmediatePropagation();
+      if (!frameEventWnd) {
+        // setupVaultId's first event is the frame's contentWindow
+        frameEventWnd = evt::getRelatedTarget();
+      } else {
+        // setupVaultId's second event is the vaultId
+        frameEventWnd::fire(new SafeCustomEvent(VAULT_WRITER_ACK, {
+          __proto__: null,
+          detail: tellBridgeToWriteVault(evt::getDetail(), frameEventWnd),
+        }));
+        frameEventWnd = null;
+      }
+    }, true);
+  } else {
+    setOwnProp(global, VAULT_WRITER, tellBridgeToWriteVault, false);
+  }
+  if (useOpener(opener) || useOpener(window !== top && parent)) {
     startHandshake();
   } else {
     /* Sites can do window.open(sameOriginUrl,'iframeNameOrNewWindowName').opener=null, spoof JS
@@ -75,13 +74,21 @@ export function injectPageSandbox() {
 
   function useOpener(opener) {
     let ok;
-    if (opener && describeProperty(opener.location, 'href').get) {
+    try {
+      ok = opener && describeProperty(opener.location, 'href').get;
+    } catch (e) {
+      // Old Chrome throws in sandboxed frames, TODO: remove `try` when minimum_chrome_version >= 86
+    }
+    if (ok) {
+      ok = false;
       // TODO: Use a single PointerEvent with `pointerType: vaultId` when strict_min_version >= 59
       if (IS_FIREFOX) {
         const setOk = evt => { ok = evt::getDetail(); };
         window::on(VAULT_WRITER_ACK, setOk, true);
-        opener::fire(new SafeMouseEvent(VAULT_WRITER, { relatedTarget: window }));
-        opener::fire(new SafeCustomEvent(VAULT_WRITER, { detail: vaultId }));
+        try {
+          opener::fire(new SafeMouseEvent(VAULT_WRITER, { relatedTarget: window }));
+          opener::fire(new SafeCustomEvent(VAULT_WRITER, { detail: vaultId }));
+        } catch (e) { /* FF quirk or bug: opener may reject our fire */ }
         window::off(VAULT_WRITER_ACK, setOk, true);
       } else {
         ok = opener[VAULT_WRITER];
@@ -116,40 +123,43 @@ export function injectPageSandbox() {
 
 /**
  * @param {VMInjection} data
+ * @param {VMInjection.Info} info
  * @param {boolean} isXml
  */
-export async function injectScripts(data, isXml) {
-  const { errors, info, [INJECT_MORE]: more } = data;
+export async function injectScripts(data, info, isXml) {
+  const { errors, [MORE]: more } = data;
   const CACHE = 'cache';
   if (errors) {
     logging.warn(errors);
   }
-  if (IS_FIREFOX) {
-    IS_FIREFOX = parseFloat(info.ua.browserVersion); // eslint-disable-line no-global-assign
-  }
+  info.gmi = {
+    isIncognito: chrome.extension.inIncognitoContext,
+  };
   bridgeInfo = createNullObj();
-  bridgeInfo[INJECT_PAGE] = info;
-  bridgeInfo[INJECT_CONTENT] = info;
+  bridgeInfo[PAGE] = info;
+  bridgeInfo[CONTENT] = info;
   assign(bridge[CACHE], data[CACHE]);
-  if (isXml || data[INJECT_CONTENT_FORCE]) {
+  if (isXml || data[FORCE_CONTENT]) {
     pageInjectable = false;
-  } else if (data[INJECT_PAGE] && pageInjectable == null) {
-    injectPageSandbox();
+  } else if (data[PAGE] && pageInjectable == null) {
+    injectPageSandbox(data);
   }
-  const toContent = data.scripts
-    .filter(scr => triageScript(scr) === INJECT_CONTENT)
+  const toContent = data[SCRIPTS]
+    .filter(scr => triageScript(scr) === CONTENT)
     .map(scr => [scr.id, scr.key.data]);
   const moreData = (more || toContent.length)
     && sendCmd('InjectionFeedback', {
-      [INJECT_CONTENT_FORCE]: !pageInjectable,
-      [INJECT_CONTENT]: toContent,
-      [INJECT_MORE]: more,
+      [FORCE_CONTENT]: !pageInjectable,
+      [CONTENT]: toContent,
+      [MORE]: more,
+      url: IS_FIREFOX && location.href,
     });
   const getReadyState = describeProperty(Document[PROTO], 'readyState').get;
   const hasInvoker = contLists;
   if (hasInvoker) {
     setupContentInvoker();
   }
+  tardyQueue = createNullObj();
   // Using a callback to avoid a microtask tick when the root element exists or appears.
   await onElement('*', injectAll, 'start');
   if (pageLists?.body || contLists?.body) {
@@ -165,7 +175,7 @@ export async function injectScripts(data, isXml) {
       });
       await 0; // let the site's listeners on `window` run first
     }
-    for (const scr of data.scripts) {
+    for (const scr of data[SCRIPTS]) {
       triageScript(scr);
     }
     if (contLists && !hasInvoker) {
@@ -180,14 +190,14 @@ export async function injectScripts(data, isXml) {
 
 function triageScript(script) {
   let realm = script[INJECT_INTO];
-  realm = (realm === INJECT_AUTO && !pageInjectable) || realm === INJECT_CONTENT
-    ? INJECT_CONTENT
-    : pageInjectable && INJECT_PAGE;
+  realm = (realm === AUTO && !pageInjectable) || realm === CONTENT
+    ? CONTENT
+    : pageInjectable && PAGE;
   if (realm) {
-    const lists = realm === INJECT_CONTENT
+    const lists = realm === CONTENT
       ? contLists || (contLists = createNullObj())
       : pageLists || (pageLists = createNullObj());
-    const { gmi, [META_STR]: metaStr, pathMap, runAt } = script;
+    const { gmi, [META_STR]: metaStr, pathMap, [RUN_AT]: runAt } = script;
     const list = lists[runAt] || (lists[runAt] = []);
     safePush(list, script);
     setOwnProp(gmi, 'scriptMetaStr', metaStr[0]
@@ -202,7 +212,7 @@ function triageScript(script) {
 
 function inject(item, iframeCb) {
   const { code } = item;
-  const isCodeArray = isObject(code)
+  const isCodeArray = isObject(code);
   const script = makeElem('script', !isCodeArray && code);
   // Firefox ignores sourceURL comment when a syntax error occurs so we'll print the name manually
   const onError = IS_FIREFOX && !iframeCb && (e => {
@@ -222,6 +232,7 @@ function inject(item, iframeCb) {
   if (isCodeArray) {
     safeApply(append, script, code);
   }
+  addNonceAttribute(script);
   let iframe;
   let iframeDoc;
   if (iframeCb) {
@@ -267,15 +278,14 @@ function inject(item, iframeCb) {
 function injectAll(runAt) {
   let res;
   for (let inPage = 1; inPage >= 0; inPage--) {
-    const realm = inPage ? INJECT_PAGE : INJECT_CONTENT;
+    const realm = inPage ? PAGE : CONTENT;
     const lists = inPage ? pageLists : contLists;
     const items = lists?.[runAt];
     if (items) {
       bridge.post('ScriptData', { items, info: bridgeInfo[realm] }, realm);
       bridgeInfo[realm] = false; // must be a sendable value to have own prop in the receiver
-      if (!tardyQueue) tardyQueue = createNullObj();
       for (const { id } of items) tardyQueue[id] = 1;
-      if (!inPage) nextTask()::then(tardyQueueCheck);
+      if (!inPage) nextTask()::then(() => tardyQueueCheck(items));
       else if (!IS_FIREFOX) res = injectPageList(runAt);
     }
   }
@@ -288,6 +298,7 @@ async function injectPageList(runAt) {
     if (scr.code) {
       if (runAt === 'idle') await nextTask();
       if (runAt === 'end') await 0;
+      tardyQueueCheck([scr]);
       // Exposing window.vmXXX setter just before running the script to avoid interception
       if (!scr.meta.unwrap) bridge.post('Plant', scr.key);
       inject(scr);
@@ -295,14 +306,13 @@ async function injectPageList(runAt) {
       if (scr.meta.unwrap) Run(scr.id);
     }
   }
-  tardyQueueCheck();
 }
 
 function setupContentInvoker() {
-  const invokeContent = VMInitInjection(IS_FIREFOX)(bridge.onHandle);
+  const invokeContent = VMInitInjection(IS_FIREFOX)(bridge.onHandle, logging);
   const postViaBridge = bridge.post;
   bridge.post = (cmd, params, realm, node) => {
-    const fn = realm === INJECT_CONTENT
+    const fn = realm === CONTENT
       ? invokeContent
       : postViaBridge;
     fn(cmd, params, undefined, node);
@@ -313,19 +323,25 @@ function setupContentInvoker() {
  * Chrome doesn't fire a syntax error event, so we'll mark ids that didn't start yet
  * as "still starting", so the popup can show them accordingly.
  */
-function tardyQueueCheck() {
-  for (const id in tardyQueue) {
-    if (bridgeIds[id] === 1) bridgeIds[id] = ID_INJECTING;
+function tardyQueueCheck(scripts) {
+  for (const { id } of scripts) {
+    if (tardyQueue[id]) {
+      if (bridgeIds[id] === 1) bridgeIds[id] = ID_INJECTING;
+      delete tardyQueue[id];
+    }
   }
-  tardyQueue = null;
 }
 
 function tellBridgeToWriteVault(vaultId, wnd) {
   const { post } = bridge;
   if (post) { // may be absent if this page doesn't have scripts
-    post('WriteVault', vaultId, INJECT_PAGE, wnd);
+    post('WriteVault', vaultId, PAGE, wnd);
     return true;
   }
+}
+
+export function addNonceAttribute(script) {
+  if (nonce) script::setAttribute('nonce', nonce);
 }
 
 function addVaultExports(vaultSrc) {
@@ -333,7 +349,7 @@ function addVaultExports(vaultSrc) {
   const exports = cloneInto(createNullObj(), document);
   // In FF a detached iframe's `console` doesn't print anything, we'll export it from content
   const exportedConsole = cloneInto(createNullObj(), document);
-  ['log', 'info', 'warn', 'error', 'debug']::forEach(k => {
+  CONSOLE_METHODS::forEach(k => {
     exportedConsole[k] = exportFunction(logging[k], document);
     /* global exportFunction */
   });

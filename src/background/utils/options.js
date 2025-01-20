@@ -1,39 +1,29 @@
-import { debounce, ensureArray, initHooks, normalizeKeys } from '@/common';
-import { deepCopy, deepEqual, mapEntry, objectGet, objectSet } from '@/common/object';
-import defaults from '@/common/options-defaults';
-import { preInitialize } from './init';
-import { addOwnCommands, commands } from './message';
+import { debounce, initHooks, normalizeKeys, sendCmd } from '@/common';
+import { deepCopy, deepEqual, objectGet, objectSet } from '@/common/object';
+import defaults, { kScriptTemplate } from '@/common/options-defaults';
+import { addOwnCommands, init } from './init';
 import storage from './storage';
 
 let changes;
-let initPending;
-let options = {};
 
 addOwnCommands({
   /** @return {Object} */
   GetAllOptions() {
-    return commands.GetOptions(defaults);
-  },
-  /** @return {Object} */
-  GetOptions(data) {
-    return data::mapEntry((_, key) => getOption(key));
+    return Object.assign({}, defaults, options); // eslint-disable-line no-use-before-define
   },
   /**
-   * @param {{key:string, value?:PlainJSONValue, reply?:boolean}|Array} data
-   * @return {Promise<void>}
+   * @param {{ [key:string]: PlainJSONValue }} data
+   * @return {void}
    * @throws {?} hooks can throw after the option was set */
-  async SetOptions(data) {
-    if (initPending) await initPending;
-    for (const { key, value, reply } of ensureArray(data)) {
-      setOption(key, value, reply);
-    }
-    if (changes) callHooks(); // exceptions will be sent to the caller
+  SetOptions(data) {
+    for (const key in data) setOption(key, data[key], true);
+    callHooks(); // exceptions will be sent to the caller
   },
 });
 
-const STORAGE_KEY = 'options';
-const VERSION = 'version';
-const TPL_KEY = 'scriptTemplate';
+const options = {};
+export const kOptions = 'options';
+export const kVersion = 'version';
 const TPL_OLD_VAL = `\
 // ==UserScript==
 // @name New Script
@@ -46,23 +36,25 @@ const DELAY = 100;
 const hooks = initHooks();
 const callHooksLater = debounce(callHooks, DELAY);
 const writeOptionsLater = debounce(writeOptions, DELAY);
+const optProxy = new Proxy(defaults, { get: (_, key) => getOption(key) });
+export const hookOptions = hooks.hook;
+hookOptions(data => sendCmd('UpdateOptions', data));
 
-initPending = storage.base.getOne(STORAGE_KEY).then(data => {
-  if (isObject(data)) options = data;
+export function initOptions(data) {
+  data = data[kOptions] || {};
+  Object.assign(options, data);
   if (process.env.DEBUG) console.info('options:', options);
-  if (!options[VERSION]) {
-    setOption(VERSION, 1);
+  if (!options[kVersion]) {
+    setOption(kVersion, 1);
   }
-  if (options[TPL_KEY] === TPL_OLD_VAL) {
-    options[TPL_KEY] = defaults[TPL_KEY]; // will be detected by omitDefaultValue below
+  if (options[kScriptTemplate] === TPL_OLD_VAL) {
+    options[kScriptTemplate] = defaults[kScriptTemplate]; // will be detected by omitDefaultValue below
   }
   if (Object.keys(options).map(omitDefaultValue).some(Boolean)) {
-    delete options[`${TPL_KEY}Edited`]; // TODO: remove this in 2023
+    delete options[`${kScriptTemplate}Edited`]; // TODO: remove this in 2023
     writeOptionsLater();
   }
-  initPending = null;
-});
-preInitialize.push(initPending);
+}
 
 /**
  * @param {!string} key - must be "a.b.c" to allow clients easily set inside existing object trees
@@ -78,21 +70,30 @@ function addChange(key, value, silent) {
 
 /** @throws in option handlers */
 function callHooks() {
+  if (!changes) return; // may happen in callHooksLater if callHooks was called earlier
   const tmp = changes;
   changes = null;
   hooks.fire(tmp);
 }
 
-export function getOption(key, def) {
+/** Hooks and calls the callback with a copy of all options when init is resolved */
+export function hookOptionsInit(cb) {
+  if (init) init.then(() => cb(optProxy, true));
+  else cb(optProxy, true);
+  return hookOptions(cb);
+}
+
+export function getOption(key) {
+  let res = options[key];
+  if (res != null) return res;
   const keys = normalizeKeys(key);
   const mainKey = keys[0];
-  const value = options[mainKey] ?? deepCopy(defaults[mainKey]) ?? def;
-  return keys.length > 1 ? objectGet(value, keys.slice(1)) ?? def : value;
+  const value = options[mainKey] ?? deepCopy(defaults[mainKey]);
+  return keys.length > 1 ? objectGet(value, keys.slice(1)) : value;
 }
 
 export function setOption(key, value, silent) {
-  // eslint-disable-next-line prefer-rest-params
-  if (initPending) return initPending.then(() => setOption(...arguments));
+  if (init) return init.then(setOption.bind(null, ...arguments));
   const keys = normalizeKeys(key);
   const mainKey = keys[0];
   key = keys.join('.'); // must be a string for addChange()
@@ -114,12 +115,10 @@ export function setOption(key, value, silent) {
 }
 
 function writeOptions() {
-  return storage.base.setOne(STORAGE_KEY, options);
+  return storage.base.setOne(kOptions, options);
 }
 
 function omitDefaultValue(key) {
   return deepEqual(options[key], defaults[key])
     && delete options[key];
 }
-
-export const hookOptions = hooks.hook;

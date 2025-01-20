@@ -1,18 +1,17 @@
-import '@/common/browser'; // eslint-disable-line no-restricted-imports
-import { sendCmd } from '@/common'; // eslint-disable-line no-restricted-imports
+import browser from '@/common/browser'; // eslint-disable-line no-restricted-imports
+import { sendCmd } from './content/util';
 import { USERSCRIPT_META_INTRO } from './util';
 import './content';
 
 // Script installation in Firefox as it does not support `onBeforeRequest` for `file:`
 // Using pathname and a case-sensitive check to match webRequest `urls` filter behavior
-if (IS_FIREFOX && IS_TOP
+if (IS_FIREFOX && topRenderMode === 1
 && location.protocol === 'file:'
 && location.pathname.endsWith('.user.js')
 && document.contentType === 'application/x-javascript' // FF uses this for file: scheme
 ) {
   (async () => {
     const {
-      browser,
       fetch,
       history,
     } = global;
@@ -22,6 +21,7 @@ if (IS_FIREFOX && IS_TOP
     const url = location.href;
     const fetchCode = async () => (await fetch(url, { mode: 'same-origin' }))::getText();
     let code = await fetchCode();
+    let busy;
     let oldCode;
     if (code::stringIndexOf(USERSCRIPT_META_INTRO) < 0) {
       return;
@@ -34,7 +34,12 @@ if (IS_FIREFOX && IS_TOP
       browser.runtime.onConnect.addListener(port => {
         if (port.name !== 'FetchSelf') return;
         port.onMessage.addListener(async () => {
-          code = await fetchCode();
+          try {
+            if (busy) await busy;
+            code = await (busy = fetchCode());
+          } finally {
+            busy = false;
+          }
           if (code === oldCode) {
             code = null;
           } else {

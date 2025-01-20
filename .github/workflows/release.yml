@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - v*
@@ -15,12 +16,15 @@ jobs:
           fetch-depth: 250 # for `action-helper`
           # persist-credentials: false # not implemented in v1
 
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v3
         with:
-          node-version: '16'
+          node-version: '20'
 
       - name: Prepare
         run: yarn && node scripts/action-helper.js
+        env:
+          ACTION_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DISCORD_WEBHOOK_RELEASE: ${{ secrets.DISCORD_WEBHOOK_RELEASE }}
 
       - name: Build
         env:
@@ -36,9 +40,15 @@ jobs:
 
           # Create source zip
           git archive @ --format=zip > $TEMP_DIR/$SOURCE_ZIP
+          # Include .env to ensure the output is reproducible
+          export | grep SYNC_ | sed -e 's/^declare -x //' > .env \
+            && zip -u $TEMP_DIR/$SOURCE_ZIP .env && rm .env
 
           # Build for release, also upload to GitHub assets
           yarn build
+          # Build one more time to make sure the output is the same
+          mv dist $TEMP_DIR/dist && yarn build && diff -qr dist $TEMP_DIR/dist
+
           cd dist && zip -r ../$ASSETS_DIR/$ASSET_ZIP . && cd ..
 
           # Build for CWS beta, append `BETA` to version name
@@ -52,30 +62,22 @@ jobs:
           cd dist && zip -r ../$TEMP_DIR/$ASSET_SELF_HOSTED_ZIP . && cd ..
 
       - name: Publish to AMO
-        id: signAMO
         continue-on-error: true
         run: |
           mkdir -p $TEMP_DIR/updates
           if [ "$PRERELEASE" != "true" ]; then
             echo Publish listed version
-            # Ignore error since we don't need to download it
             node scripts/amo-upload.mjs
           else
             echo Publish unlisted version
-            BETA=1 node scripts/amo-upload.mjs
+            DEBUG=amo-upload BETA=1 node scripts/amo-upload.mjs
           fi
         env:
           AMO_KEY: ${{ secrets.AMO_KEY }}
           AMO_SECRET: ${{ secrets.AMO_SECRET }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update updates.json
-        uses: JamesIves/github-pages-deploy-action@4.1.0
-        if: steps.signAMO.outcome == 'success'
-        with:
-          branch: updates
-          folder: ${{ env.TEMP_DIR }}/updates
-          commit-message: Update to ${{ env.VERSION }} 🚀
+          # Try to publish if not exist
+          AMO_PUBLISH: true
 
       - name: Publish to CWS
         continue-on-error: true
@@ -99,4 +101,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          node -e 'require("./scripts/release-helper").uploadAssets()';
+          node -e 'import("./scripts/release-helper.mjs").then(({ uploadAssets }) => uploadAssets())';

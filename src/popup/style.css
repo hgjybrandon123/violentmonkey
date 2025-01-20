@@ -21,6 +21,9 @@ $DARKhoverColor: var(--fill-15);
 $DARKhoverBack: #404c5c;
 $DARKhoverButtonInactiveBack: #5b6979;
 
+html {
+  scrollbar-width: none; /* Vivaldi: preventing the full-body scrollbar before size-adjustment kicks in */
+}
 body {
   width: 320px;
   max-width: 100%;
@@ -41,8 +44,6 @@ a {
 }
 
 .page-popup {
-  /* hardcoded popup height in Chrome */
-  max-height: 600px;
   overflow: hidden;
   .incognito {
     padding: $padding $padding 0 $leftPaneWidth;
@@ -55,6 +56,10 @@ footer {
   text-align: center;
   font-size: $fontSize;
   color: var(--fill-6);
+  a:not([href]) {
+    color: var(--fg);
+    font-weight: bold;
+  }
 }
 
 .logo {
@@ -62,9 +67,9 @@ footer {
   margin: 0 $logoMLR;
   img {
     width: $logoSize;
-  }
-  &.disabled > img {
-    opacity: .5;
+    [data-is-applied="false"] & {
+      opacity: .5;
+    }
   }
 }
 
@@ -81,18 +86,16 @@ footer {
   }
   .script:not(.disabled):not(.runs) & .script-name,
   .disabled:not(.runs) > & {
-    color: var(--fill-8);
+    opacity: .65;
     &:hover,
     &:focus {
-      color: var(--fill-2);
+      opacity: 1;
     }
   }
 }
 
-.ext-name {
-  &.disabled {
-    color: var(--fill-8);
-  }
+[data-is-applied="false"] .ext-name {
+  color: var(--fill-8);
 }
 
 .script-icon {
@@ -109,12 +112,32 @@ footer {
   }
 }
 
+.script-name {
+  /* expand right-click-to-edit area */
+  flex: 1;
+  align-self: stretch;
+  align-items: center;
+  display: flex;
+  .tardy {
+    margin-left: .5rem;
+    color: red;
+    .icon {
+      width: 16px;
+      height: 16px;
+      vertical-align: text-bottom;
+    }
+  }
+}
+
 .menu-buttons {
   align-items: center;
   padding: $padding $padding $padding 0;
   background: var(--bg);
   > .menu-area {
-    padding: $padding;
+    padding: $padding calc($padding * .75);
+    &:last-child { /* vertical "..." */
+      margin: 0 calc($padding * -.5);
+    }
   }
   .icon {
     display: block;
@@ -131,12 +154,12 @@ footer {
   &-item {
     position: relative;
     display: flex;
+    flex-wrap: wrap; /* the update notice must go to the next row */
     align-items: center;
     min-height: 2rem;
     padding-left: $itemPaddingX;
     padding-right: $itemPaddingX;
     text-align: left;
-    white-space: nowrap;
     .submenu & {
       text-align: left;
     }
@@ -195,6 +218,7 @@ footer {
     }
   }
   &.expand {
+    overflow-y: auto;
     > .submenu {
       display: block;
       border-color: var(--fill-4);
@@ -211,7 +235,6 @@ footer {
 .submenu {
   display: none;
   min-height: 2rem;
-  max-height: 30rem;
   overflow-y: auto;
   background: var(--bg);
   border-top: 1px dashed var(--fill-3);
@@ -252,6 +275,7 @@ footer {
     font-size: .8rem;
     color: var(--fill-12);
     > .menu-item {
+      min-height: 1.5rem;
       padding-left: $leftPaneWidth;
       > .icon {
         margin-right: .5rem;
@@ -271,35 +295,37 @@ footer {
   line-height: 1.2; /* lower values cut descender in "g" */
   background: var(--fill-0-5);
   border: 1px solid var(--fill-2);
-  > div {
-    max-height: $footerHeight;
-    overflow: hidden;
-  }
+  max-height: $footerHeight;
+  overflow: hidden;
+  white-space: pre-wrap;
 }
 
 .failure-reason {
   padding: .5rem $itemPaddingX .5rem $leftPaneWidth;
-  [data-failure-reason=""] > & {
-    // Making the warning noticeable at the bottom of the script list
-    background: hsla(30, 100%, 50%, .2);
-  }
   code {
     max-width: 100%;
   }
+  &.note {
+    font-size: smaller;
+    padding-left: $iconML;
+    hyphens: auto;
+  }
 }
 
-.reload-hint {
-  .icon {
-    position: absolute;
-    left: $findIconML;
-    width: $findIconSize;
-    height: $findIconSize;
+.page-popup:not(.noninjectable):not(.blacklisted) {
+  .failure-reason {
+    // Making the warning noticeable
+    background: hsla(30, 100%, 50%, .2);
+  }
+  .settings {
+    background: none;
   }
 }
 
 .extras-menu {
   position: fixed;
   right: 1rem;
+  max-width: 75vw;
   box-shadow: 1px 1px 10px #0008;
   z-index: 100;
   background: var(--bg);
@@ -326,7 +352,11 @@ footer {
 .excludes-menu {
   padding: .25rem .5rem .25rem $leftPaneWidth;
   button {
-    margin: .5rem .5rem 0 0;
+    text-align: left;
+    max-width: 100%;
+  }
+  input {
+    width: 100%;
   }
   details {
     summary {
@@ -359,11 +389,29 @@ footer {
   user-select: none;
 }
 
-[data-upd]::after {
-  content: attr(data-upd);
-  position: absolute;
+.upd[title] {
+  width: 100%;
+  padding-left: $leftPaneWidth;
   font-size: 10px;
-  bottom: -4px;
+  margin-top: -4px;
   line-height: 1;
-  color: var(--fill-7);
+  color: goldenrod;
+  &[data-error] {
+    color: red;
+  }
+  &::after {
+    content: attr(title);
+  }
+}
+
+.settings {
+  padding: 1em;
+  overflow-y: auto;
+}
+
+.syntax {
+  font-size: xx-small;
+  position: absolute;
+  top: -0.2em;
+  color: red;
 }

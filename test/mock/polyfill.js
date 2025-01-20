@@ -1,25 +1,34 @@
-import tldRules from 'tldjs/rules.json';
-
+global.chrome =
 global.browser = {
   storage: {
     local: {
       get() {
-        return Promise.resolve({
-          'dat:tldRules': tldRules,
-        });
+        return Promise.resolve({});
       },
       set() {
         return Promise.resolve();
       },
     },
   },
+  extension: {
+    isAllowedFileSchemeAccess: () => false,
+  },
   runtime: {
     getURL: path => path,
+    getManifest: () => ({
+      icons: { 16: '' },
+      options_ui: {},
+    }),
+    getPlatformInfo: async () => ({}),
   },
-};
-global.chrome = {
-  runtime: {
-    getURL: browser.runtime.getURL,
+  tabs: {
+    onRemoved: { addListener: () => {} },
+    onReplaced: { addListener: () => {} },
+    onUpdated: { addListener: () => {} },
+  },
+  windows: {
+    getAll: () => [{}],
+    getCurrent: () => ({}),
   },
 };
 if (!window.Response) window.Response = { prototype: {} };
@@ -34,6 +43,14 @@ Object.defineProperties(global, domProps);
 delete MessagePort.prototype.onmessage; // to avoid hanging
 global.PAGE_MODE_HANDSHAKE = 123;
 global.VAULT_ID = false;
+Object.assign(URL, {
+  blobCache: {},
+  createObjectURL(blob) {
+    const blobUrl = `blob:${Math.random()}`;
+    URL.blobCache[blobUrl] = blob;
+    return blobUrl;
+  },
+});
 Object.assign(global, require('@/common/safe-globals-shared'));
 Object.assign(global, require('@/common/safe-globals'));
 Object.assign(global, require('@/injected/safe-globals'));

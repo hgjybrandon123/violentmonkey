@@ -1,7 +1,8 @@
+import { isTouch } from '..';
 import options from '../../options';
 import './style.css';
 
-let style;
+export let customCssElem;
 let styleTheme;
 /** @type {CSSMediaRule[]} */
 let darkMediaRules;
@@ -9,9 +10,9 @@ let localStorage = {};
 /* Accessing `localStorage` in may throw in Private Browsing mode or if dom.storage is disabled.
  * Since it allows object-like access, we'll map it to a variable with a fallback to a dummy. */
 try {
-  (localStorage = global.localStorage || {}).foo;
+  (localStorage = global.localStorage).getItem('foo');
 } catch (e) {
-  /* keep the dummy object */
+  localStorage = {};
 }
 
 const CACHE_KEY = 'cacheCustomCSS';
@@ -27,25 +28,30 @@ const setStyle = (css, elem) => {
   return elem;
 };
 
+export const findStyleSheetRules = darkThemeCondition => {
+  const res = [];
+  for (const sheet of document.styleSheets) {
+    for (const rule of sheet.cssRules) {
+      if (rule.conditionText?.includes(darkThemeCondition)) {
+        res.push(rule);
+      }
+    }
+  }
+  return res;
+};
+
 const setUiTheme = theme => {
   const darkThemeCondition = '(prefers-color-scheme: dark)';
   const mediaText = theme === 'dark' && 'screen'
     || theme === 'light' && 'not all'
     || darkThemeCondition;
   if (!darkMediaRules) {
-    darkMediaRules = [];
-    for (const sheet of document.styleSheets) {
-      for (const rule of sheet.cssRules) {
-        if (rule.conditionText?.includes(darkThemeCondition)) {
-          darkMediaRules.push(rule);
-        }
-      }
-    }
+    darkMediaRules = findStyleSheetRules(darkThemeCondition);
   }
   darkMediaRules.forEach(rule => { rule.media.mediaText = mediaText; });
 };
 
-style = setStyle(localStorage[CACHE_KEY] || '');
+customCssElem = setStyle(localStorage[CACHE_KEY] || '');
 
 options.hook((changes) => {
   let v;
@@ -57,7 +63,7 @@ options.hook((changes) => {
     setUiTheme(v);
   }
   if ((v = changes.customCSS) != null) {
-    style = setStyle(v, style);
+    customCssElem = setStyle(v, customCssElem);
     if (v && localStorage[CACHE_KEY] !== v) {
       localStorage[CACHE_KEY] = v;
     } else if (!v && CACHE_KEY in localStorage) {
@@ -66,6 +72,7 @@ options.hook((changes) => {
   }
 });
 
-if ('ontouchstart' in document) {
+if (isTouch) {
   document.documentElement.classList.add('touch');
 }
+document.documentElement.lang = chrome.i18n.getUILanguage(); // enable CSS hyphenation

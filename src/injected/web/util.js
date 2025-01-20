@@ -112,3 +112,13 @@ export const makeComponentUtils = () => {
     ),
   };
 };
+
+/** Safe Object prototype.
+ * We can't use `Object` from safe-globals as it belongs to another frame.
+ * We can't use `global.Object` as it may have been spoofed. */
+export const thisObjectProto = getPrototypeOf({});
+
+export const safeCopy = src => setPrototypeOf(
+  assign(createNullObj(), src),
+  thisObjectProto
+);

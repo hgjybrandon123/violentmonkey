@@ -1,6 +1,6 @@
 const fs = require('fs');
 const babelCore = require('@babel/core');
-const WrapperWebpackPlugin = require('wrapper-webpack-plugin');
+const webpack = require('webpack');
 
 const entryGlobals = {
   'common': [],
@@ -15,6 +15,33 @@ Object.entries(entryGlobals).forEach(([name, val]) => {
   if (parts[1]) parts[1] = name;
   val.push('*', ...parts);
 });
+
+exports.restrictedSyntax = (
+  // Hiding `code` so eslint doesn't complain about invalid schema
+  rules => rules.map(r => (
+    Object.defineProperty(r, 'code', { enumerable: false, value: r.code })
+  ))
+)([{
+  selector: 'ArrayPattern',
+  message: 'Destructuring via Symbol.iterator may be spoofed/broken in an unsafe environment',
+  code: '[window.foo]=[]',
+}, {
+  selector: ':matches(ArrayExpression, CallExpression) > SpreadElement',
+  message: 'Spreading via Symbol.iterator may be spoofed/broken in an unsafe environment',
+  code: 'open([...[]])',
+}, {
+  selector: '[callee.object.name="Object"], MemberExpression[object.name="Object"]',
+  message: 'Using potentially spoofed methods in an unsafe environment',
+  code: 'Object.assign()',
+  // TODO: auto-generate the rule using GLOBALS
+}, {
+  selector: `CallExpression[callee.name="defineProperty"]:not(${[
+    '[arguments.2.properties.0.key.name="__proto__"]',
+    ':has(CallExpression[callee.name="nullObjFrom"])'
+  ].join(',')})`,
+  message: 'Prototype of descriptor may be spoofed/broken in an unsafe environment',
+  code: 'defineProperty(open, "foo", {foo:1})',
+}]);
 
 /**
  * Adds a watcher for files in entryGlobals to properly recompile the project on changes.
@@ -38,7 +65,11 @@ function addWrapperWithGlobals(name, config, defsObj, callback) {
     .join('\n')
     .replace(defsRe, s => defsObj[s])
   );
-  config.plugins.push(new WrapperWebpackPlugin(callback(reader)));
+  const { header, footer, test } = callback(reader);
+  config.plugins.push(
+    new webpack.BannerPlugin({ test, raw: true, banner: header }),
+    new webpack.BannerPlugin({ test, raw: true, banner: footer, footer: true })
+  );
 }
 
 function getCodeMirrorThemes() {
@@ -48,14 +79,6 @@ function getCodeMirrorThemes() {
     { withFileTypes: true },
   ).map(e => e.isFile() && e.name.endsWith('.css') && e.name.slice(0, -4))
   .filter(Boolean);
-}
-
-function getUniqIdB64() {
-  return Buffer.from(
-    new Uint32Array(2)
-    .map(() => Math.random() * (2 ** 32))
-    .buffer,
-  ).toString('base64');
 }
 
 function readGlobalsFile(path, babelOpts = {}) {
@@ -75,5 +98,4 @@ function readGlobalsFile(path, babelOpts = {}) {
 
 exports.addWrapperWithGlobals = addWrapperWithGlobals;
 exports.getCodeMirrorThemes = getCodeMirrorThemes;
-exports.getUniqIdB64 = getUniqIdB64;
 exports.readGlobalsFile = readGlobalsFile;

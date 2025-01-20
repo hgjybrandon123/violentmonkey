@@ -4,16 +4,15 @@
 /**
  * `safeCall` is used by our modified babel-plugin-safe-bind.js.
  * `export` is stripped in the final output and is only used for our NodeJS test scripts.
+ * To ensure the minified name is 1 char we declare the super frequently used names first.
  */
 
-export const {
-  /* We can't use safe Promise from vault because it stops working when iframe is removed,
-   * so we use the unsafe current global - only for userscript API stuff, not internally.
-   * TODO: try reimplementing Promise in our sandbox wrapper if it can work with user code */
-  Promise: UnsafePromise,
-} = global;
-export const cloneInto = PAGE_MODE_HANDSHAKE ? null : global.cloneInto;
 export let
+  safeCall, // ~50 "::" calls
+  createNullObj, // ~25 calls
+  forEach, // ~15 calls
+  safeApply,
+  safeBind,
   // window
   SafeCustomEvent,
   SafeDOMParser,
@@ -24,6 +23,10 @@ export let
   Object,
   SafeProxy,
   SafeSymbol,
+  /** Note that in Firefox it's reused to store the current realm's prototype of Promise */
+  SafePromiseConstructor,
+  /** May be unsafe in old bugged Chrome */
+  SafePromise,
   fire,
   getWindowLength,
   getWindowParent,
@@ -36,6 +39,7 @@ export let
   defineProperty,
   describeProperty,
   getPrototypeOf,
+  setPrototypeOf,
   objectKeys,
   objectValues,
   /** Array.prototype can be eavesdropped via setters like '0','1',...
@@ -43,23 +47,16 @@ export let
    * its length or from an unassigned `hole`. */
   concat,
   filter,
-  forEach,
   indexOf,
   // Element.prototype
   remove,
   // String.prototype
   slice,
-  // safeCall
-  safeApply,
-  safeBind,
-  safeCall,
   // various values
   builtinGlobals,
   // various methods
   URLToString,
   arrayIsArray,
-  createNullObj,
-  createObjectURL,
   formDataEntries,
   hasOwnProperty,
   jsonParse,
@@ -70,22 +67,27 @@ export let
   reflectOwnKeys,
   stopImmediatePropagation,
   then,
+  urlSearchParamsToString,
   // various getters
   getCurrentScript, // Document
   getDetail, // CustomEvent
   getRelatedTarget; // MouseEvent
 
+export const cloneInto = PAGE_MODE_HANDSHAKE ? null : global.cloneInto;
 /**
  * VAULT consists of the parent's safe globals to protect our communications/globals
  * from a page that creates an iframe with src = location and modifies its contents
  * immediately after adding it to DOM via direct manipulation in frame.contentWindow
  * or window[0] before our content script runs at document_start, https://crbug.com/1261964 */
 export const VAULT = (() => {
-  let ArrayP;
+  let tmp;
+  let ChromePromiseBug;
   let Reflect;
   let SafeObject;
   let i = -1;
   let call;
+  /** Precaution against browser bugs: Symbol.toStringTag was exposed on `window` in FF88 */
+  let getOwnPropertyNames;
   let res;
   let srcFF;
   let src = global; // FF defines some stuff only on `global` in content mode
@@ -100,7 +102,9 @@ export const VAULT = (() => {
     src = res[0];
     srcWindow = src;
     // In FF some stuff from a detached iframe doesn't work, so we export it from content
-    srcFF = IS_FIREFOX && res[1];
+    if (IS_FIREFOX) srcFF = res[1];
+    // Detecting via a feature that was added in Chrome 115
+    else ChromePromiseBug = !src.document.requestStorageAccessFor;
     res = false;
   }
   if (!res) {
@@ -124,15 +128,17 @@ export const VAULT = (() => {
     // Object - using SafeObject to pacify eslint without disabling the rule
     defineProperty = (SafeObject = Object) && res[i += 1] || SafeObject.defineProperty,
     describeProperty = res[i += 1] || SafeObject.getOwnPropertyDescriptor,
+    getOwnPropertyNames = res[i += 1] || SafeObject.getOwnPropertyNames,
     getPrototypeOf = res[i += 1] || SafeObject.getPrototypeOf,
+    setPrototypeOf = res[i += 1] || SafeObject.setPrototypeOf,
     assign = res[i += 1] || SafeObject.assign,
     objectKeys = res[i += 1] || SafeObject.keys,
     objectValues = res[i += 1] || SafeObject.values,
     // Array.prototype
-    concat = res[i += 1] || (ArrayP = src.Array[PROTO]).concat,
-    filter = res[i += 1] || ArrayP.filter,
-    forEach = res[i += 1] || ArrayP.forEach,
-    indexOf = res[i += 1] || ArrayP.indexOf,
+    concat = res[i += 1] || (tmp = src.Array[PROTO]).concat,
+    filter = res[i += 1] || tmp.filter,
+    forEach = res[i += 1] || tmp.forEach,
+    indexOf = res[i += 1] || tmp.indexOf,
     // Element.prototype
     remove = res[i += 1] || src.Element[PROTO].remove,
     // String.prototype
@@ -145,9 +151,8 @@ export const VAULT = (() => {
     // various methods
     URLToString = res[i += 1] || src.URL[PROTO].toString,
     createNullObj = res[i += 1] || safeBind(SafeObject.create, SafeObject, null),
-    createObjectURL = res[i += 1] || src.URL.createObjectURL,
     formDataEntries = res[i += 1] || src.FormData[PROTO].entries,
-    hasOwnProperty = res[i += 1] || Reflect.has,
+    hasOwnProperty = res[i += 1] || safeBind(call, SafeObject[PROTO].hasOwnProperty),
     arrayIsArray = res[i += 1] || src.Array.isArray,
     /* Exporting JSON methods separately instead of exporting SafeJSON as its props may be broken
      * by the page if it gains access to any Object from the vault e.g. a thrown SafeError. */
@@ -158,7 +163,13 @@ export const VAULT = (() => {
     parseFromString = res[i += 1] || SafeDOMParser[PROTO].parseFromString,
     reflectOwnKeys = res[i += 1] || Reflect.ownKeys,
     stopImmediatePropagation = res[i += 1] || src.Event[PROTO].stopImmediatePropagation,
-    then = res[i += 1] || src.Promise[PROTO].then,
+    SafePromise = res[i += 1] || src.Promise,
+    SafePromiseConstructor = res[i += 1] || (
+      tmp = SafePromise[PROTO],
+      IS_FIREFOX ? SafePromise : tmp.constructor
+    ),
+    then = res[i += 1] || tmp.then,
+    urlSearchParamsToString = res[i += 1] || src.URLSearchParams[PROTO].toString,
     // various getters
     getCurrentScript = res[i += 1] || describeProperty(src.Document[PROTO], 'currentScript').get,
     getDetail = res[i += 1] || describeProperty(SafeCustomEvent[PROTO], 'detail').get,
@@ -169,11 +180,23 @@ export const VAULT = (() => {
       || (() => getOwnProp(window, 'parent')), // Chrome<=85 https://crrev.com/793165
     // various values
     builtinGlobals = res[i += 1] || [
-      reflectOwnKeys(srcWindow),
-      src !== srcWindow && reflectOwnKeys(src),
+      getOwnPropertyNames(srcWindow),
+      src !== srcWindow && getOwnPropertyNames(src),
     ],
   ];
   // Well-known Symbols are unforgeable
   toStringTagSym = SafeSymbol.toStringTag;
+  if (ChromePromiseBug) {
+    /* Chrome pre-115 can't use SafePromise when iframe is removed, fixed in crrev.com/1142900.
+     * We'll use the unsafe one from `window` only for userscript API stuff, not internally.
+     * Getting it in a `try` because `Promise` may already have a broken getter. */
+    try { SafePromise = Promise; } catch {/**/}
+  } else if (IS_FIREFOX) {
+    // Hijacking an unused global to store the current realm's Promise prototype
+    SafePromiseConstructor = getPrototypeOf(promiseResolve());
+  } else {
+    // Chrome 115+: binding Promise to this realm
+    SafePromise = safeBind(SafePromiseConstructor, getPrototypeOf(promiseResolve()));
+  }
   return res;
 })();

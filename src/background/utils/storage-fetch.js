@@ -1,15 +1,12 @@
-import { isDataUri, makeRaw, request } from '@/common';
+import { isCdnUrlRe, isDataUri, isRemote, makeRaw, request } from '@/common';
+import { NO_CACHE } from '@/common/consts';
 import storage from './storage';
+import { getUpdateInterval } from './update';
+import { requestLimited } from './url';
 
 storage.cache.fetch = cacheOrFetch({
-  init(options) {
-    return { ...options, [kResponseType]: 'blob' };
-  },
-  async transform(response, url, options, check) {
-    const [type, body] = await makeRaw(response, true);
-    await check?.(url, response.data, type);
-    return `${type},${body}`;
-  },
+  init: options => ({ ...options, [kResponseType]: 'blob' }),
+  transform: response => makeRaw(response),
 });
 
 storage.require.fetch = cacheOrFetch({
@@ -39,6 +36,9 @@ function cacheOrFetch(handlers = {}) {
       if (res) {
         const result = transform ? await transform(res, ...args) : res.data;
         await this.setOne(url, result);
+        if (options === 'res') {
+          return result;
+        }
       }
     } finally {
       delete requests[url];
@@ -46,14 +46,29 @@ function cacheOrFetch(handlers = {}) {
   }
 }
 
+/**
+ * @param {string} url
+ * @param {VMReq.OptionsMulti} [opts]
+ * @return {Promise<VMReq.Response> | void}
+ */
 export async function requestNewer(url, opts) {
   if (isDataUri(url)) {
     return;
   }
-  const modOld = await storage.mod.getOne(url);
-  for (const get of [0, 1]) {
+  let multi, modOld, modDate;
+  const isLocal = !isRemote(url);
+  if (!isLocal && opts && (multi = opts[MULTI])
+  && isObject(modOld = await storage.mod.getOne(url))) {
+    [modOld, modDate] = modOld;
+  }
+  if (multi === AUTO && modDate > Date.now() - getUpdateInterval()) {
+    return;
+  }
+  for (const get of multi ? [0, 1] : [1]) {
     if (modOld || get) {
-      const req = await request(url, !get ? { ...opts, method: 'HEAD' } : opts);
+      const req = await (isLocal || isCdnUrlRe.test(url) ? request : requestLimited)(url,
+        get ? opts
+          : { ...opts, ...NO_CACHE, method: 'HEAD' });
       const { headers } = req;
       const mod = (
         headers.get('etag')
@@ -64,7 +79,7 @@ export async function requestNewer(url, opts) {
         return;
       }
       if (get) {
-        if (mod) storage.mod.setOne(url, mod);
+        if (mod) storage.mod.setOne(url, [mod, Date.now()]);
         else if (modOld) storage.mod.remove(url);
         return req;
       }

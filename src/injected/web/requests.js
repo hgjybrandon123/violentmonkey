@@ -2,9 +2,13 @@ import bridge, { addHandlers } from './bridge';
 
 /** @type {Object<string,GMReq.Web>} */
 const idMap = createNullObj();
+const kContentTextHtml = 'text/html';
 const kResponse = 'response';
 const kResponseXML = 'responseXML';
 const kDocument = 'document';
+const kRaw = 'raw';
+const kOnerror = 'onerror';
+const kOnload = 'onload';
 const EVENTS_TO_NOTIFY = [
   'abort',
   'error',
@@ -27,15 +31,22 @@ const OPTS_TO_PASS = [
   'timeout',
   'user',
 ];
-const XHR_TYPE_BIN = {
+const PARSEABLE_TYPES = [
+  'application/xhtml+xml',
+  'application/xml',
+  'image/svg+xml',
+  'text/xml',
+  kContentTextHtml,
+];
+/** truthy = preserve type (for binary mode), otherwise it's text mode by default */
+const XHR_TYPES = {
+  __proto__: null,
   arraybuffer: 1,
   blob: 1,
-};
-const XHR_TYPE_TXT = {
-  [kDocument]: 1,
-  json: 1,
-  text: 1,
-  '': 1,
+  json: 0,
+  [kDocument]: 0,
+  text: 0,
+  '': 0,
 };
 
 addHandlers({
@@ -61,20 +72,33 @@ addHandlers({
     const {
       [kResponse]: response,
       [kResponseHeaders]: headers,
-      [kResponseText]: text,
     } = data;
-    if (response != null || data.readyState === 4) {
-      req.raw = response;
+    let raw = req[kRaw];
+    if (response != null) {
+      if (req[kXhrType]) {
+        req[kRaw] = response;
+      } else {
+        if (!raw) raw = req[kRaw] = [];
+        if (isString(response)) {
+          safePush(raw, response);
+        } else {
+          for (const chunk of response) safePush(raw, chunk);
+        }
+      }
+    }
+    if (req[kXhrType]) {
+      setOwnProp(data, kResponseText, null);
+    } else if (!raw || raw.length <= 1) {
+      setOwnProp(data, kResponseText, raw && raw[0] || '');
+    } else if (raw.length) {
+      setOwnProp(data, kResponseText, safeBind(parseRaw, data, req, msg, kResponseText),
+        true, 'get');
     }
     if (headers != null) {
       req[kResponseHeaders] = headers;
     }
-    if (text != null) {
-      req[kResponseText] = getOwnProp(text, 0) === 'same' ? response : text;
-    }
     setOwnProp(data, 'context', req.context);
     setOwnProp(data, kResponseHeaders, req[kResponseHeaders]);
-    setOwnProp(data, kResponseText, req[kResponseText]);
     setOwnProp(data, kResponseXML, safeBind(parseRaw, data, req, msg, kResponseXML), true, 'get');
     setOwnProp(data, kResponse, safeBind(parseRaw, data, req, msg, kResponse), true, 'get');
     cb(data);
@@ -92,21 +116,35 @@ addHandlers({
  */
 function parseRaw(req, msg, propName) {
   const { [kResponseType]: responseType } = req;
-  let res;
-  if ('raw' in req) {
-    res = req.raw;
-    if (responseType === kDocument || !responseType && propName === kResponseXML) {
-      res = new SafeDOMParser()::parseFromString(res, getContentType(msg) || 'text/html');
-    } else if (responseType === 'json') {
-      res = jsonParse(res);
+  let res, ct, tmp;
+  if (kRaw in req) {
+    res = req[kRaw];
+    if (!req[kXhrType]) {
+      tmp = res;
+      res = '';
+      tmp::forEach(chunk => res += chunk);
+      req[kRaw] = [res];
+      req[kResponseText] = res;
+    }
+    if (responseType === kDocument && (ct = kContentTextHtml)
+    || !responseType
+      && propName === kResponseXML
+      && PARSEABLE_TYPES::indexOf(ct = getContentType(msg) || kContentTextHtml) >= 0
+    || responseType === 'json') {
+      try { res = ct ? new SafeDOMParser()::parseFromString(res, ct) : jsonParse(res); }
+      catch (e) { res = null; /* per specification */ }
     }
     if (responseType === kDocument) {
       const otherPropName = propName === kResponse ? kResponseXML : kResponse;
       setOwnProp(this, otherPropName, res);
       req[otherPropName] = res;
     }
+    // TODO: should we implement this spec behavior?
+    // if (propName === kResponseXML && responseType && responseType !== kDocument) {
+    //   throw new SafeError('responseXML failed: responseType must be "document" or "" or absent.');
+    // }
     if (responseType) {
-      delete req.raw;
+      delete req[kRaw];
     }
     req[propName] = res;
   } else {
@@ -123,12 +161,12 @@ function parseRaw(req, msg, propName) {
  * @param {GMReq.UserOpts} opts - must already have a null proto
  * @param {GMContext} context
  * @param {string} fileName
- * @return {VMScriptXHRControl}
+ * @return {VMScriptXHRControl | Promise<VMScriptXHRControl>}
  */
 export function onRequestCreate(opts, context, fileName) {
   if (process.env.DEBUG) throwIfProtoPresent(opts);
-  let { data, url } = opts;
-  let err;
+  let { data, url, [kResponseType]: type = '' } = opts;
+  let err, res;
   // XHR spec requires `url` but allows ''/null/non-string
   if (!url && !('url' in opts)) {
     err = new SafeError('Required parameter "url" is missing.');
@@ -138,7 +176,7 @@ export function onRequestCreate(opts, context, fileName) {
       try { url = url::URLToString(); } // safe window.URL getter
       catch (e) {
         try { url = `${url}`; } // unsafe toString may throw e.g. for Symbol or if spoofed
-        catch (e) { err = e; }
+        catch (e2) { err = e2; }
       }
     }
     opts.url = url;
@@ -147,6 +185,10 @@ export function onRequestCreate(opts, context, fileName) {
     onRequestInitError(opts, err);
     return; // not returning the abort controller as there's no request to abort
   }
+  if (!(type in XHR_TYPES)) {
+    logging.warn(`Unknown ${kResponseType} "${type}"`);
+    type = '';
+  }
   const scriptId = context.id;
   const id = safeGetUniqId('VMxhr');
   const cb = createNullObj();
@@ -154,11 +196,17 @@ export function onRequestCreate(opts, context, fileName) {
   // withCredentials is for GM4 compatibility and used only if `anonymous` is not set,
   // it's true by default per the standard/historical behavior of gmxhr
   const { withCredentials = true, anonymous = !withCredentials } = opts;
+  // setting opts.onload and onerror before EVENTS_TO_NOTIFY
+  if (context.async) res = new SafePromise((resolve, reject) => {
+    const { [kOnload]: onload, [kOnerror]: onerror } = opts;
+    opts[kOnload] = onload ? v => { resolve(v); onload(v); } : resolve;
+    opts[kOnerror] = onerror ? v => { reject(v); onerror(v); } : reject;
+  });
   idMap[id] = req;
   data = data == null && []
     // `binary` is for TM/GM-compatibility + non-objects = must use a string `data`
     || (opts.binary || !isObject(data)) && [`${data}`]
-    // No browser can send FormData directly across worlds
+    // No browser can send FormData/URLSearchParams directly across worlds
     || getFormData(data)
     // FF56+ can send any cloneable data directly, FF52-55 can't due to https://bugzil.la/1371246
     || IS_FIREFOX >= 56 && [data]
@@ -171,17 +219,17 @@ export function onRequestCreate(opts, context, fileName) {
     scriptId,
     url,
     [kFileName]: fileName,
+    [kResponseType]: type,
+    [kXhrType]: req[kXhrType] = XHR_TYPES[type] ? type : '',
     events: EVENTS_TO_NOTIFY::filter(key => isFunction(cb[key] = opts[`on${key}`])),
-    xhrType: getResponseType(opts[kResponseType]),
   }, opts, OPTS_TO_PASS));
-  return {
-    abort() {
-      bridge.post('AbortRequest', id);
-    },
-  };
+  if (!res) res = {};
+  else if (IS_FIREFOX) setPrototypeOf(res, SafePromiseConstructor);
+  setOwnProp(res, 'abort', () => bridge.post('AbortRequest', id));
+  return res;
 }
 
-export function onRequestInitError({ onerror }, err) {
+export function onRequestInitError({ [kOnerror]: onerror }, err) {
   if (isFunction(onerror)) onerror(err);
   else throw err;
 }
@@ -212,14 +260,9 @@ function getFormData(data) {
   } catch (e) {
     /**/
   }
-}
-
-function getResponseType(responseType = '') {
-  if (hasOwnProperty(XHR_TYPE_BIN, responseType)) {
-    return responseType;
+  try {
+    return [data::urlSearchParamsToString(), 'usp'];
+  } catch (e) {
+    /**/
   }
-  if (!hasOwnProperty(XHR_TYPE_TXT, responseType)) {
-    logging.warn(`Unknown ${kResponseType} "${responseType}"`);
-  }
-  return '';
 }

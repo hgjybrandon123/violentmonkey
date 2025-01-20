@@ -6,24 +6,30 @@
  * Not exporting NodeJS built-in globals as this file is imported in the test scripts.
  */
 
-const global = (function _() {
-  return this || globalThis; // eslint-disable-line no-undef
-}());
-/** These two are unforgeable so we extract them primarily to improve minification.
- * The document's value can change only in about:blank but we don't inject there. */
-const { document, window } = global;
+const global = process.env.TEST ? globalThis : this; // eslint-disable-line no-undef
+const { window } = global; // it's unforgeable so we extract it primarily to improve minification
 export const VIOLENTMONKEY = 'Violentmonkey';
-export const INJECT_AUTO = 'auto';
-export const INJECT_PAGE = 'page';
-export const INJECT_CONTENT = 'content';
-export const INJECT_CONTENT_FORCE = 'forceContent';
-export const INJECT_INTO = 'injectInto';
-export const INJECT_MORE = 'more';
-export const INJECT_VAL = 'val';
+export const AUTO = 'auto';
+export const CONTENT = 'content';
+export const EXPOSE = 'expose';
+export const FORCE_CONTENT = 'forceContent';
+export const IDS = 'ids';
 export const ID_BAD_REALM = -1;
 export const ID_INJECTING = 2;
+export const INJECT_INTO = 'injectInto';
+export const MORE = 'more';
+export const PAGE = 'page';
+export const RUN_AT = 'runAt';
+export const SCRIPTS = 'scripts';
+export const VALUES = 'values';
+export const kResponse = 'response';
 export const kResponseHeaders = 'responseHeaders';
 export const kResponseText = 'responseText';
 export const kResponseType = 'responseType';
+export const kSessionId = 'sessionId';
+export const kTop = 'top';
+export const kXhrType = 'xhrType';
+export const SKIP_SCRIPTS = 'SkipScripts';
 export const isFunction = val => typeof val === 'function';
 export const isObject = val => val != null && typeof val === 'object';
+export const kFileName = 'fileName';

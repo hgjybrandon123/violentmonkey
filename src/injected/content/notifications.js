@@ -2,9 +2,11 @@ import bridge, { addBackgroundHandlers, addHandlers } from './bridge';
 import { sendCmd } from './util';
 
 const notifications = createNullObj();
+const relay = (msg, n) => n && bridge.post(msg, n.id, n.realm) && n;
 
 addHandlers({
   async Notification(options, realm) {
+    await bridge[REIFY];
     const nid = await sendCmd('Notification', options);
     notifications[nid] = { id: options.id, realm };
   },
@@ -20,13 +22,10 @@ addHandlers({
 
 addBackgroundHandlers({
   NotificationClick(nid) {
-    const n = notifications[nid];
-    if (n) bridge.post('NotificationClicked', n.id, n.realm);
+    relay('NotificationClicked', notifications[nid]);
   },
   NotificationClose(nid) {
-    const n = notifications[nid];
-    if (n) {
-      bridge.post('NotificationClosed', n.id, n.realm);
+    if (relay('NotificationClosed', notifications[nid])) {
       delete notifications[nid];
     }
   },

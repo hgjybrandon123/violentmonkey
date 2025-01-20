@@ -1,32 +1,21 @@
 // SAFETY WARNING! Exports used by `injected` must make ::safe() calls and use __proto__:null
 
-import { browser } from '@/common/consts';
+import { NO_CACHE } from '@/common/consts';
 
-export function i18n(name, args) {
-  return browser.i18n.getMessage(name, args) || name;
-}
+export const i18n = memoize((name, args) => chrome.i18n.getMessage(name, args) || name);
 
-export function toString(param) {
-  if (param == null) return '';
-  return `${param}`;
-}
-
-export function memoize(func, resolver = toString) {
-  const cacheMap = {};
+export function memoize(func) {
+  const cacheMap = /*@__PURE__*/Object.create(null);
   function memoized(...args) {
-    // Used in safe context
-    // eslint-disable-next-line no-restricted-syntax
-    const key = resolver(...args);
-    let cache = cacheMap[key];
-    if (!cache) {
-      cache = {
-        value: func.apply(this, args),
-      };
-      cacheMap[key] = cache;
-    }
-    return cache.value;
+    const key = args.length === 1 ? `${args[0]}` : JSON.stringify(args);
+    const res = cacheMap[key];
+    return res !== undefined || hasOwnProperty(cacheMap, key)
+      ? res
+      : (cacheMap[key] = safeApply(func, this, args));
   }
-  return memoized;
+  return process.env.DEV
+    ? Object.defineProperty(memoized, 'name', { value: func.name + ':memoized' })
+    : memoized;
 }
 
 export function debounce(func, time) {
@@ -71,10 +60,14 @@ export function throttle(func, time) {
 
 export function noop() {}
 
-export function getUniqId(prefix = 'VM') {
+export function getRandomString(minLength = 10, maxLength = 0) {
   for (let rnd = ''; (rnd += Math.random().toString(36).slice(2));) {
-    if (rnd.length > 9) return prefix + rnd;
+    if (rnd.length >= minLength) return maxLength ? rnd.slice(0, maxLength) : rnd;
   }
+}
+
+export function getUniqId(prefix = 'VM') {
+  return prefix + getRandomString();
 }
 
 /**
@@ -235,6 +228,7 @@ export async function requestLocalFile(url, options = {}) {
       headers: {
         get: name => xhr.getResponseHeader(name),
       },
+      url,
     };
     const { [kResponseType]: responseType } = options;
     xhr.open('GET', url, true);
@@ -242,7 +236,7 @@ export async function requestLocalFile(url, options = {}) {
     xhr.onload = () => {
       // status for `file:` protocol will always be `0`
       result.status = xhr.status || 200;
-      result.data = binaryTypes.includes(responseType) ? xhr.response : xhr[kResponseText];
+      result.data = xhr[binaryTypes.includes(responseType) ? kResponse : kResponseText];
       if (responseType === 'json') {
         try {
           result.data = JSON.parse(result.data);
@@ -250,11 +244,7 @@ export async function requestLocalFile(url, options = {}) {
           // ignore invalid JSON
         }
       }
-      if (result.status > 300) {
-        reject(result);
-      } else {
-        resolve(result);
-      }
+      resolve(result);
     };
     xhr.onerror = () => {
       result.status = -1;
@@ -264,16 +254,10 @@ export async function requestLocalFile(url, options = {}) {
   });
 }
 
-/**
- * Excludes `text/html` to avoid LINK header that Chrome uses to prefetch js and css,
- * because GreasyFork's 404 error response causes CSP violations in console of our page.
- */
-const FORCED_ACCEPT = {
-  'greasyfork.org': 'application/javascript, text/plain, text/css',
-};
-
+const isDataUriRe = /^data:/i;
+const isHttpOrHttpsRe = /^https?:\/\//i;
 const isLocalUrlRe = re`/^(
-  file:\/\/|
+  file:|
   about:|
   data:|
   https?:\/\/
@@ -287,8 +271,51 @@ const isLocalUrlRe = re`/^(
     )
     (:\d+|\/|$)
 )/ix`;
-export const isDataUri = url => /^data:/i.test(url);
+/** Cherry-picked from https://greasyfork.org/en/help/cdns */
+export const isCdnUrlRe = re`/^https:\/\/(
+  (\w+-)?cdn(js)?(-\w+)?\.[^/]+ |
+  bundle\.run |
+  (www\.)?gitcdn\.\w+ |
+  (
+    ajax\.aspnetcdn |
+    apis\.google |
+    apps\.bdimg |
+    caiyunapp |
+    code\.(bdstatic | jquery) |
+    kit\.fontawesome |
+    lib\.baomitu |
+    libs\.baidu |
+    npm\.elemecdn |
+    registry\.npmmirror |
+    static\.(hdslb | yximgs) |
+    uicdn\.toast |
+    unpkg |
+    www\.(gstatic | layuicdn) |
+    \w+\.googleapis
+  )\.com |
+  (
+    bowercdn |
+    craig\.global\.ssl\.fastly
+  )\.net |
+  [^/.]+\.(
+    github\.(io | com) |
+    zstatic\.net
+  )
+)\//ix`;
+export const isDataUri = /*@__PURE__*/isDataUriRe.test.bind(isDataUriRe);
+export const isValidHttpUrl = url => isHttpOrHttpsRe.test(url) && tryUrl(url);
 export const isRemote = url => url && !isLocalUrlRe.test(decodeURI(url));
+
+/** @returns {string|undefined} */
+export function tryUrl(str, base) {
+  try {
+    if (str ?? base) {
+      return new URL(str, base).href; // throws on invalid urls
+    }
+  } catch (e) {
+    // undefined
+  }
+}
 
 /**
  * Make a request.
@@ -297,16 +324,16 @@ export const isRemote = url => url && !isLocalUrlRe.test(decodeURI(url));
  * @return {Promise<VMReq.Response>}
  */
 export async function request(url, options = {}) {
-  // fetch does not support local file
-  if (url.startsWith('file://')) return requestLocalFile(url, options);
+  // fetch supports file:// since Chrome 99 but we use XHR for consistency
+  if (url.startsWith('file:')) return requestLocalFile(url, options);
   const { body, headers, [kResponseType]: responseType } = options;
   const isBodyObj = body && body::({}).toString() === '[object Object]';
   const [, scheme, auth, hostname, urlTail] = url.match(/^([-\w]+:\/\/)([^@/]*@)?([^/]*)(.*)|$/);
-  const accept = FORCED_ACCEPT[hostname];
-  // Not using ...spread because Babel mistakenly adds its polyfill to injected-web
-  const init = Object.assign({
-    cache: isRemote(url) ? undefined : 'no-cache',
-  }, options, {
+  // Avoiding LINK header prefetch of js in 404 pages which cause CSP violations in our console
+  // TODO: toggle a webRequest/declarativeNetRequest rule to strip LINK headers
+  const accept = (hostname === 'greasyfork.org' || hostname === 'sleazyfork.org')
+    && 'application/javascript, text/plain, text/css';
+  const init = Object.assign({}, !isRemote(url) && NO_CACHE, options, {
     body: isBodyObj ? JSON.stringify(body) : body,
     headers: isBodyObj || accept || auth
       ? Object.assign({},
@@ -351,4 +378,12 @@ export function dumpScriptValue(value, jsonDump = JSON.stringify) {
     const simple = SIMPLE_VALUE_TYPE[typeof value];
     return `${simple || 'o'}${simple ? value : jsonDump(value)}`;
   }
+}
+
+export function normalizeTag(tag) {
+  return tag.replace(/[^\w.-]/g, '');
+}
+
+export function escapeStringForRegExp(str) {
+  return str.replace(/[\\.?+[\]{}()|^$]/g, '\\$&');
 }

@@ -1,15 +1,18 @@
+let { browser } = global;
+const kAddListener = 'addListener';
+const kRemoveListener = 'removeListener';
+
 // Since this also runs in a content script we'll guard against implicit global variables
 // for DOM elements with 'id' attribute which is a standard feature, more info:
 // https://github.com/mozilla/webextension-polyfill/pull/153
 // https://html.spec.whatwg.org/multipage/window-object.html#named-access-on-the-window-object
-if (!IS_FIREFOX && !global.browser?.runtime) {
-  // region Chrome
-  const { chrome, Proxy: SafeProxy } = global;
+if (!IS_FIREFOX && !browser?.runtime) {
+  const { Proxy: SafeProxy } = global;
   const { bind } = SafeProxy;
   const MESSAGE = 'message';
   const STACK = 'stack';
-  const isSyncMethodName = key => key === 'addListener'
-    || key === 'removeListener'
+  const isSyncMethodName = key => key === kAddListener
+    || key === kRemoveListener
     || key === 'hasListener'
     || key === 'hasListeners';
   /** API types or enums or literal constants */
@@ -31,7 +34,8 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
     target[key] = res;
     return res;
   };
-  const proxifyGroup = (src, meta) => new SafeProxy({}, {
+  const proxifyGroup = (src, meta) => new SafeProxy({ __proto__: null }, {
+    __proto__: null,
     get: (group, key) => group[key] ?? proxifyValue(group, key, src, meta?.[key]),
   });
   /**
@@ -53,7 +57,7 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
       // Make the error messages actually useful by capturing a real stack
       const stackInfo = new SafeError(`callstack before invoking ${func.name || 'chrome API'}:`);
       // A single parameter `result` is fine because we don't use API that return more
-      args[args.length] = result => {
+      const cb = result => {
         const runtimeErr = chrome.runtime.lastError;
         const err = runtimeErr || (
           preprocessorFunc
@@ -69,66 +73,68 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
         }
       };
       if (process.env.IS_INJECTED) {
+        safePush(args, cb); /* global safePush */
         try {
           safeApply(func, thisArg, args);
         } catch (e) {
           if (e[MESSAGE] === 'Extension context invalidated.') {
-            console.error(`Please reload the tab to restore ${VIOLENTMONKEY} API for userscripts.`);
+            /* global logging */// only used with process.env.IS_INJECTED=content
+            logging.error(`Please reload the tab to restore ${VIOLENTMONKEY} API for userscripts.`);
           } else {
             throw e;
           }
         }
       } else {
-        safeApply(func, thisArg, args);
+        /* Not process.env.IS_INJECTED */// eslint-disable-next-line no-restricted-syntax
+        thisArg::func(...args, cb);
       }
       if (process.env.DEBUG) promise.catch(err => console.warn(args, err?.[MESSAGE] || err));
       return promise;
     }
   );
-  // Both result and error must be explicitly specified to avoid prototype eavesdropping
-  const wrapSuccess = result => [
-    result,
-    null,
-  ];
-  // Both result and error must be explicitly specified to avoid prototype eavesdropping
-  const wrapError = err => process.env.DEBUG && console.warn(err) || [
-    null,
-    err?.[MESSAGE]
-      ? [err[MESSAGE], err[STACK]]
-      : [err, new SafeError()[STACK]],
-  ];
+  const wrapResponse = (result, error) => {
+    if (process.env.DEBUG) console[error ? 'warn' : 'log']('sendResponse', error || result);
+    return [
+      result ?? null, // `undefined` is not transferable in Chrome, but `null` is
+      error && (
+        error[MESSAGE]
+          ? [error[MESSAGE], error[STACK]]
+          : [error, new SafeError()[STACK]]
+      ),
+    ];
+  };
   const sendResponseAsync = async (result, sendResponse) => {
     try {
-      result = await result;
-      if (process.env.DEBUG) console.info('send', result);
-      sendResponse(wrapSuccess(result));
+      sendResponse(wrapResponse(await result));
     } catch (err) {
-      sendResponse(wrapError(err));
+      sendResponse(wrapResponse(0, err));
     }
   };
   const onMessageListener = (listener, message, sender, sendResponse) => {
     if (process.env.DEBUG) console.info('receive', message);
     try {
       const result = listener(message, sender);
-      if (result && isFunction(result.then)) {
+      if (result && (
+        process.env.IS_INJECTED
+          ? isPromise(result) /* global isPromise */
+          : result instanceof Promise
+      )) {
         sendResponseAsync(result, sendResponse);
         return true;
-      }
-      // In some browsers (e.g Chrome 56, Vivaldi), the listener in
-      // popup pages are not properly cleared after closed.
-      // They may send `undefined` before the real response is sent.
-      if (result !== undefined) {
-        sendResponse(wrapSuccess(result));
+      } else if (result !== undefined) {
+        /* WARNING: when using onMessage in extension pages don't use `async`
+         * and make sure to return `undefined` for content messages like GetInjected */
+        sendResponse(wrapResponse(result));
       }
     } catch (err) {
-      sendResponse(wrapError(err));
+      sendResponse(wrapResponse(0, err));
     }
   };
   /** @type {WrapAsyncPreprocessorFunc} */
   const unwrapResponse = (resolve, response) => (
     !response && 'null response'
-    || response[1] // error created in wrapError
-    || resolve(response[0]) // result created in wrapSuccess
+    || response[1] // error created in wrapResponse
+    || resolve(response[0]) // result created in wrapResponse
   );
   const wrapSendMessage = (runtime, sendMessage) => (
     wrapAsync(runtime, sendMessage, unwrapResponse)
@@ -137,7 +143,7 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
    * 0 = non-async method or the entire group
    * function = transformer like (originalObj, originalFunc): function
    */
-  global.browser = proxifyGroup(chrome, {
+  browser = global.browser = proxifyGroup(chrome, {
     extension: 0, // we don't use its async methods
     i18n: 0, // we don't use its async methods
     runtime: {
@@ -145,23 +151,31 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
       getManifest: 0,
       getURL: 0,
       onMessage: {
-        addListener: (onMessage, addListener) => (
-          listener => onMessage::addListener(onMessageListener::bind(null, listener))
+        [kAddListener]: (onMessage, addListener) => (
+          listener => {
+            if (process.env.DEV
+            && !process.env.IS_INJECTED
+            && /^async/.test(listener)) {
+              throw new Error('onMessage listener cannot be async');
+              // ...because it must be able to return `undefined` for unintended messages
+              // to allow onMessage of the intended context to handle this message
+              // TODO: migrate to addRuntimeListener(fn, commands: object)
+            }
+            return onMessage::addListener(onMessageListener::bind(null, listener));
+          }
         ),
       },
       sendMessage: wrapSendMessage,
     },
-    tabs: {
+    tabs: !process.env.IS_INJECTED && {
       connect: 0,
       sendMessage: wrapSendMessage,
     },
   });
-  // endregion
 } else if (process.env.DEBUG && IS_FIREFOX) {
-  // region Firefox
   /* eslint-disable no-restricted-syntax */// this is a debug-only section
   let counter = 0;
-  const { runtime } = global.browser;
+  const { runtime } = browser;
   const { sendMessage, onMessage } = runtime;
   const log = (type, args, id, isResponse) => console.info(
     `${type}Message#%d${isResponse ? ' response' : ''}`,
@@ -188,7 +202,6 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
     return result;
   });
   /* eslint-enable no-restricted-syntax */
-  // endregion
 }
 
 /**
@@ -197,3 +210,15 @@ if (!IS_FIREFOX && !global.browser?.runtime) {
  * @param {any} response - API callback's response
  * @returns {?string[]} - [errorMessage, errorStack] array on error
  */
+
+export default browser;
+
+/** @this {object} browser api event like browser.tabs.onRemoved */
+export function listenOnce(cb) {
+  const event = this;
+  const onceFn = data => {
+    event[kRemoveListener](onceFn);
+    cb(data);
+  };
+  event[kAddListener](onceFn);
+}

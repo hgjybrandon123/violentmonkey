@@ -1,12 +1,13 @@
 import {
-  debounce, normalizeKeys, request, noop, makePause, ensureArray, sendCmd, blob2base64, getUniqId,
+  debounce, normalizeKeys, request, noop, makePause, ensureArray, sendCmd,
+  buffer2string, getRandomString,
 } from '@/common';
 import { TIMEOUT_HOUR } from '@/common/consts';
 import {
   forEachEntry, objectSet, objectPick,
 } from '@/common/object';
 import {
-  getEventEmitter, getOption, setOption, hookOptions,
+  getEventEmitter, getOption, setOption,
 } from '../utils';
 import {
   sortScripts,
@@ -49,7 +50,7 @@ function initConfig() {
   function get(key, def) {
     const keys = normalizeKeys(key);
     keys.unshift('sync');
-    return getOption(keys, def);
+    return getOption(keys) ?? def;
   }
   function set(key, value) {
     const keys = normalizeKeys(key);
@@ -280,9 +281,10 @@ export const BaseService = serviceFactory({
   prepareHeaders() {
     this.headers = {};
   },
-  prepare() {
+  prepare(promise) {
     this.authState.set('initializing');
-    return (this.initToken() ? Promise.resolve(this.user()) : Promise.reject({
+    return Promise.resolve(promise)
+    .then(() => this.initToken() ? this.user() : Promise.reject({
       type: 'no-auth',
     }))
     .then(() => {
@@ -298,8 +300,8 @@ export const BaseService = serviceFactory({
       throw err;
     });
   },
-  checkSync() {
-    return this.prepare()
+  checkSync(promise) {
+    return this.prepare(promise)
     .then(() => this.startSync());
   },
   user: noop,
@@ -554,7 +556,7 @@ export function initialize() {
       services[name] = service;
     });
   }
-  sync();
+  return sync();
 }
 
 function syncOne(service) {
@@ -620,11 +622,6 @@ export async function openAuthPage(url, redirectUri) {
   }, ['blocking']);
 }
 
-hookOptions((data) => {
-  const value = data?.['sync.current'];
-  if (value) initialize();
-});
-
 const base64urlMapping = {
   '+': '-',
   '/': '_',
@@ -633,8 +630,7 @@ const base64urlMapping = {
 async function sha256b64url(code) {
   const bin = new TextEncoder().encode(code);
   const buffer = await crypto.subtle.digest('SHA-256', bin);
-  const blob = new Blob([buffer], { type: 'application/octet-binary' });
-  const b64 = await blob2base64(blob);
+  const b64 = btoa(buffer2string(buffer));
   return b64.replace(/[+/=]/g, m => base64urlMapping[m] || '');
 }
 
@@ -644,7 +640,7 @@ async function sha256b64url(code) {
  * Ref: RFC 7636
  */
 export function getCodeVerifier() {
-  return getUniqId(getUniqId(getUniqId()));
+  return getRandomString(43, 128);
 }
 
 export async function getCodeChallenge(codeVerifier) {

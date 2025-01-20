@@ -1,5 +1,5 @@
-import { getUniqId } from '@/common';
-import { loadQuery, dumpQuery } from '../utils';
+import { dumpQuery, getUniqId, loadQuery } from '@/common';
+import { FORM_URLENCODED, VM_HOME } from '@/common/consts';
 import {
   getURI, getItemFilename, BaseService, isScriptFile, register,
   openAuthPage,
@@ -9,7 +9,7 @@ import {
 
 const config = {
   client_id: process.env.SYNC_DROPBOX_CLIENT_ID,
-  redirect_uri: 'https://violentmonkey.github.io/auth_dropbox.html',
+  redirect_uri: VM_HOME + 'auth_dropbox.html',
 };
 
 const escRE = /[\u007f-\uffff]/g; // eslint-disable-line no-control-regex
@@ -135,7 +135,7 @@ const Dropbox = BaseService.extend({
       method: 'POST',
       url: 'https://api.dropbox.com/oauth2/token',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': FORM_URLENCODED,
       },
       body: dumpQuery({
         client_id: config.client_id,
@@ -157,13 +157,12 @@ const Dropbox = BaseService.extend({
     const { state, codeVerifier } = this.session || {};
     this.session = null;
     if (query.state !== state || !query.code) return;
-    this.authorized({
+    this.checkSync(this.authorized({
       code: query.code,
       code_verifier: codeVerifier,
       grant_type: 'authorization_code',
       redirect_uri: config.redirect_uri,
-    })
-    .then(() => this.checkSync());
+    }));
     return true;
   },
   revoke() {

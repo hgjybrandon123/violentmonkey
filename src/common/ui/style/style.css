@@ -1,7 +1,10 @@
 * {
   margin: 0;
-  padding: 0;
   box-sizing: border-box;
+}
+*:not(select) {
+  /* SELECT retains sensible minimum padding in Chrome but not in Firefox */
+  padding: 0;
 }
 
 :root {
@@ -55,7 +58,7 @@
 }
 
 body {
-  overflow: hidden; // avoid flash of viewport caused by tooltip
+  // overflow: hidden; // avoid flash of viewport caused by tooltip
   font-size: 1rem;
   background: var(--bg);
   color: var(--fg);
@@ -95,10 +98,13 @@ a {
     text-decoration: underline;
   }
 }
+span:focus {
+  text-decoration: underline;
+}
 hr {
-  margin: .5rem;
-  border: none;
-  border-top: 1px solid var(--fill-7);
+  margin: .5rem 0;
+  border-style: solid;
+  border-width: 1px 0 0 0;
 }
 input[type=checkbox] {
   margin-right: .2em;
@@ -107,10 +113,7 @@ input[type=checkbox] {
   }
 }
 button,
-input[type="text"],
-input[type="search"],
-input[type="number"],
-input[type="password"],
+input,
 select,
 textarea {
   border: 1px solid var(--fill-3);
@@ -126,11 +129,13 @@ input[type=url],
 input[type=search],
 input[type=number],
 input[type=password] {
-  line-height: 1.5rem;
   &[disabled] {
     background: var(--fill-1);
     cursor: not-allowed;
   }
+}
+select {
+  field-sizing: content;
 }
 textarea {
   display: block;
@@ -142,8 +147,9 @@ input[type=search],
 input[type=number],
 input[type=password],
 textarea {
-  padding: 0 .5rem;
+  padding: 0 .2em;
 }
+kbd,
 code {
   padding: 0 .2em;
   background: hsla(45, 75%, 75%, .25);
@@ -194,13 +200,18 @@ button {
 }
 
 button,
-.btn-ghost,
-.sep {
-  display: inline-block;
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
   padding: 0 .5rem;
   font-size: 1rem;
   line-height: 1.5;
   vertical-align: bottom;
+  &,
+  &:hover,
+  &:focus {
+    text-decoration: none;
+  }
 }
 .btn-ghost {
   color: inherit;
@@ -219,19 +230,31 @@ button,
     background: var(--fill-1);
     border-color: var(--fill-4);
   }
+  &.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+.btn-danger {
+  color: #f00;
 }
 
-span:focus,
-a:focus {
-  text-decoration: underline;
-}
 a[tabindex="0"] {
   cursor: pointer;
 }
+a:not([href]):hover {
+  text-decoration: none;
+}
 
 .sep {
+  display: inline-block;
+  padding: 0 .5rem;
+  font-size: 1rem;
+  line-height: 1;
   &::after {
     content: '';
+    display: inline-block;
+    height: 1em;
     border-right: 1px solid var(--fill-4);
   }
 }
@@ -315,6 +338,9 @@ li {
 .h-100 {
   height: 100%;
 }
+.w-100 {
+  width: 100%;
+}
 .w-1 {
   width: 4em;
 }
@@ -344,6 +370,9 @@ li {
 }
 .scroll-y {
   overflow-y: auto;
+}
+.subtle {
+  color: var(--fill-7);
 }
 
 .frame {
@@ -392,12 +421,21 @@ body .vl-tooltip {
   box-shadow: 0 0 40px #000;
 }
 
-.has-error {
+.has-error,
+.btn-ghost.has-error,
+input[type].has-error {
   // reminder: make sure all colors are readable in light/dark schemes
   border-color: #8008;
   background: #f002;
   &:focus {
     border-color: #f008;
+  }
+}
+
+.scary-switch:checked {
+  accent-color: red;
+  & + span {
+    color: red;
   }
 }
 
@@ -474,7 +512,7 @@ body .vl-tooltip {
   }
 }
 
-@media (max-width: 500px) { /* This value is also used in other files */
+@media (max-width: 550px) { /* This value is also used in other files */
   .hidden-sm {
     display: none !important;
   }

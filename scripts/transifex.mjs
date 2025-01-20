@@ -1,7 +1,6 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import spawn from 'cross-spawn';
 import yaml from 'js-yaml';
-import fetch from 'node-fetch';
 
 const PROJECT_ID = 'o:violentmonkey:p:violentmonkey-nex';
 const RESOURCE_ID = `${PROJECT_ID}:r:messagesjson`;
@@ -82,7 +81,7 @@ async function doRequest(path, options) {
   };
   const qs = options.query ? `?${new URLSearchParams(options.query)}` : '';
   if (options.body) {
-    init.headers['content-type'] = 'application/vnd.api+json';
+    init.headers['content-type'] ||= 'application/vnd.api+json';
     init.body = JSON.stringify(options.body);
   }
   if (!path.includes('://')) path = `https://rest.api.transifex.com${path}`;
@@ -291,7 +290,7 @@ async function batchHandle(handle, allowedLangs) {
       finished += 1;
       showProgress();
     } catch (err) {
-      process.stderr.write(`\nError pulling ${lang}\n`)
+      process.stderr.write(`\nError handling ${lang}\n`);
       throw err;
     }
   }));

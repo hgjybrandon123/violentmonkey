@@ -18,7 +18,7 @@ declare interface GMContext {
   id: number;
   resCache: StringMap;
   resources: StringMap;
-  script: VMScript;
+  displayName: string;
 }
 
 /**
@@ -26,14 +26,20 @@ declare interface GMContext {
  */
 declare namespace GMReq {
   type EventType = keyof XMLHttpRequestEventMap;
+  type Response = string | Blob | ArrayBuffer;
   type UserOpts = VMScriptGMDownloadOptions | VMScriptGMXHRDetails;
   interface BG {
-    anonymous: boolean;
     cb: (data: GMReq.Message.BGAny) => Promise<void>;
+    /** use browser's `Cookie` header */
+    cookie?: boolean;
+    /** allow Set-Cookie header to affect browser */
+    'set-cookie'?: boolean;
     coreId: number;
+    /** Firefox-only workaround for CSP blocking a blob: URL */
+    fileName: string;
+    frame: VMMessageTargetFrame;
     frameId: number;
     id: string;
-    noNativeCookie: boolean;
     responseHeaders: string;
     storeId: string;
     tabId: number;
@@ -41,18 +47,19 @@ declare namespace GMReq {
     xhr: XMLHttpRequest;
   }
   interface Content {
-    arr?: Uint8Array;
-    asBlob: boolean;
+    chunks?: Uint8Array | string[];
     fileName: string;
     realm: VMScriptInjectInto;
+    response?: Response;
+    xhrType: XMLHttpRequestResponseType;
   }
   interface Web {
     id: string;
     scriptId: number;
     cb: { [name: EventType]: typeof VMScriptGMXHRDetails.onload };
     context?: any;
-    raw?: string | Blob | ArrayBuffer;
-    response?: string | Blob | ArrayBuffer;
+    raw?: Response;
+    response?: Response;
     responseHeaders?: string;
     responseText?: string;
     responseType?: XMLHttpRequestResponseType;
@@ -70,6 +77,7 @@ declare namespace GMReq {
     }
     interface BGChunk {
       id: string;
+      i: number;
       chunk: number;
       data: string;
       size: number;
@@ -92,9 +100,12 @@ declare namespace GMReq {
       method?: string;
       overrideMimeType?: string;
       password?: string;
+      responseType: XMLHttpRequestResponseType;
       timeout?: number;
+      ua?: string[];
       url: string;
       user?: string;
+      /** responseType to use in the actual XHR */
       xhrType: XMLHttpRequestResponseType;
     }
   }
@@ -119,6 +130,25 @@ declare type VMBridgePostFunc = (
 
 declare type VMBadgeMode = 'unique' | 'total' | ''
 
+declare type VMBadgeData = {
+  /** Map: frameId -> number of scripts in this frame */
+  frameIds: { [frameId: string]: number };
+  icon: string;
+  /** all ids */
+  ids: Set<number>;
+  /**
+   * undefined = after VM started (unknown injectability),
+   * null = after tab navigated (unknown injectability),
+   * false = without scripts,
+   * true = with some scripts,
+   * 'SkipScripts' = skip scripts mode,
+   * 'off' = loaded when isApplied was off
+   */
+  inject: boolean | string;
+  total: number;
+  unique: number;
+}
+
 /**
  * Internal script representation
  */
@@ -138,15 +168,19 @@ declare namespace VMScript {
   type Config = {
     enabled: NumBool;
     removed: NumBool;
-    shouldUpdate: NumBool;
+    /** 2 = allow updates and local edits */
+    shouldUpdate: NumBool | 2;
     notifyUpdates?: NumBoolNull;
   }
   type Custom = {
     name?: string;
+    /** Installation web page that will be used for inferring a missing @homepageURL */
+    from?: string;
     downloadURL?: string;
     homepageURL?: string;
     lastInstallURL?: string;
     updateURL?: string;
+    icon?: string;
     injectInto?: VMScriptInjectInto;
     noframes?: NumBoolNull;
     exclude?: string[];
@@ -159,6 +193,7 @@ declare namespace VMScript {
     origMatch: boolean;
     pathMap?: StringMap;
     runAt?: VMScriptRunAt;
+    tags?: string;
   }
   type Meta = {
     description?: string;
@@ -178,6 +213,7 @@ declare namespace VMScript {
     resources: StringMap;
     runAt?: VMScriptRunAt;
     supportURL?: string;
+    topLevelAwait?: boolean;
     unwrap?: boolean;
     version?: string;
   }
@@ -191,6 +227,32 @@ declare namespace VMScript {
   }
 }
 
+declare interface VMScriptSourceOptions {
+  code?: string;
+  config?: VMScript.Config;
+  custom?: VMScript.Custom;
+  meta?: VMScript.Meta;
+  props?: VMScript.Props;
+
+  id?: number;
+  isNew?: boolean;
+  position?: number;
+
+  cache?: StringMap;
+  require?: StringMap;
+
+  from?: string;
+  url?: string;
+
+  bumpDate?: boolean;
+  fetchOpts?: object;
+  message?: string;
+  portId?: string;
+  reloadTab?: boolean;
+  reuseDeps?: boolean;
+  update?: object;
+}
+
 /**
  * Injection data sent to the content bridge when injection is disabled
  */
@@ -198,23 +260,28 @@ declare interface VMInjectionDisabled {
   expose: string | false;
 }
 
+declare interface VMInjectionFlags {
+  clipFF?: boolean;
+  forceContent?: boolean;
+}
+
 /**
  * Injection data sent to the content bridge when injection is enabled
  */
-declare interface VMInjection extends VMInjectionDisabled {
+declare interface VMInjection extends VMInjectionDisabled, VMInjectionFlags {
   cache: StringMap;
-  clipFF?: boolean;
   errors: string[];
-  forceContent?: boolean;
   /** content bridge adds the actually running ids and sends via SetPopup */
   ids: number[];
   info: VMInjection.Info;
-  injectInto: VMScriptInjectInto;
+  injectInto: VMScriptInjectInto | 'SkipScripts';
   /** cache key for envDelayed, which also tells content bridge to expect envDelayed */
   more: string;
+  nonce?: string;
   /** `page` mode will be necessary */
   page: boolean;
   scripts: VMInjection.Script[];
+  sessionId: string;
 }
 
 /**
@@ -236,29 +303,33 @@ declare namespace VMInjection {
     value: { [scriptId: string]: StringMap };
     valueIds: number[];
   }
-  interface EnvStart extends Env {
+  interface EnvStart extends Env, VMInjectionFlags {
     allIds: { [id: string]: NumBool };
-    clipFF?: boolean;
-    forceContent?: boolean;
     more: EnvDelayed;
+    /** `null` = env was processed and contains data now */
     promise: Promise<EnvStart>;
   }
   interface EnvDelayed extends Env {
     /** cache key for Bag */
     more: string;
+    /** `null` = env was processed and contains data now */
     promise: Promise<EnvDelayed>;
   }
   /**
    * Contains the injected data and non-injected auxiliaries
    */
   interface Bag {
-    csReg: Promise<browser.contentScripts.RegisteredContentScript>;
+    csReg?: Promise<browser.contentScripts.RegisteredContentScript>;
     forceContent?: boolean;
     inject: VMInjection;
     more: EnvDelayed;
   }
   interface Info {
+    gmi: {
+      isIncognito: boolean;
+    };
     ua: VMScriptGMInfoPlatform;
+    uad?: true;
   }
   /**
    * Script prepared for injection
@@ -277,7 +348,7 @@ declare namespace VMInjection {
     metaStr: (string|number)[];
     pathMap: StringMap;
     runAt?: RunAt;
-    val?: StringMap;
+    values?: StringMap;
   }
 }
 
@@ -298,7 +369,11 @@ declare interface VMRealmData {
 declare namespace VMReq {
   interface Options extends RequestInit {
     /** @implements XMLHttpRequestResponseType */
-    responseType: '' | 'arraybuffer' | 'blob' | 'json' | 'text';
+    responseType?: '' | 'arraybuffer' | 'blob' | 'json' | 'text';
+  }
+  interface OptionsMulti extends Options {
+    /** truthy = multi script update, 'auto' = autoUpdate, falsy = single */
+    multi?: boolean | 'auto';
   }
   interface Response {
     url: string;
@@ -318,17 +393,23 @@ declare type VMSearchOptions = {
 /** Throws on error */
 declare type VMStorageFetch = (
   url: string,
-  options?: VMReq.Options,
-  check?: (...args) => void // throws on error
+  /** 'res' makes the function resolve with the result */
+  options?: VMReq.Options | 'res',
 ) => Promise<void>
 
-declare interface VMUserAgent extends VMScriptGMInfoPlatform {
-  /** Chrome/ium version number */
-  chrome: number | typeof NaN;
-  /** derived from UA string initially, a real number when `ready` */
-  firefox: number | typeof NaN;
-  /** resolves when `browser` API returns real versions */
-  ready: Promise<void>;
+/** Augmented by handleCommandMessage in messages from the content script */
+declare interface VMMessageSender extends chrome.runtime.MessageSender {
+  top?: VMTopRenderMode;
 }
+
+declare type VMMessageTargetFrame = { frameId?: number } | { documentId?: string }
+/**
+ * 0 = frame
+ * 1 = top page
+ * 2 = pre-rendered top page invisible
+ * 3 = pre-rendered top-page reified (the mode is set temporarily just to notify bg)
+ * 4 = pre-rendered top-page post-reification
+ */
+declare type VMTopRenderMode = 0 | 1 | 2 | 3 | 4;
 
 //#endregion Generic

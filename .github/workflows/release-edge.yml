@@ -16,12 +16,15 @@ jobs:
           fetch-depth: 250 # for `action-helper`
           # persist-credentials: false # not implemented in v1
 
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v3
         with:
-          node-version: '16'
+          node-version: '20'
 
       - name: Prepare
         run: yarn && node scripts/action-helper.js
+        env:
+          ACTION_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DISCORD_WEBHOOK_RELEASE: ${{ secrets.DISCORD_WEBHOOK_RELEASE }}
 
       - name: Build
         env:
@@ -37,9 +40,9 @@ jobs:
           yarn build
           cd dist && zip -r ../$ASSETS_DIR/$ASSET_ZIP . && cd ..
 
-      - uses: denoland/setup-deno@v1
+      - uses: denoland/setup-deno@v2
         with:
-          deno-version: v1.x
+          deno-version: v2.x
 
       - name: Publish to Edge
         run: |

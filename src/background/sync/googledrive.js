@@ -1,9 +1,9 @@
 // Reference:
 // - https://developers.google.com/identity/protocols/oauth2/native-app
 // - https://developers.google.com/drive/v3/reference/files
-import { getUniqId, noop } from '@/common';
+import { dumpQuery, getUniqId, loadQuery, noop } from '@/common';
+import { CHARSET_UTF8, FORM_URLENCODED } from '@/common/consts';
 import { objectGet } from '@/common/object';
-import { loadQuery, dumpQuery } from '../utils';
 import {
   getURI, getItemFilename, BaseService, register, isScriptFile,
   openAuthPage,
@@ -18,7 +18,7 @@ const config = {
   // Google OAuth for native app only allows loopback IP address for callback URL.
   // The URL will be intercepted and blocked so the port doesn't matter.
   redirect_uri: 'http://127.0.0.1:45678/',
-  // redirect_uri: 'https://violentmonkey.github.io/auth_googledrive.html',
+  // redirect_uri: VM_HOME + 'auth_googledrive.html',
   scope: 'https://www.googleapis.com/auth/drive.appdata',
 };
 const UNAUTHORIZED = { status: 'UNAUTHORIZED' };
@@ -122,13 +122,12 @@ const GoogleDrive = BaseService.extend({
     this.session = null;
     if (query.state !== state || !query.code) return;
     this.authState.set('authorizing');
-    this.authorized({
+    this.checkSync(this.authorized({
       code: query.code,
       code_verifier: codeVerifier,
       grant_type: 'authorization_code',
       redirect_uri: config.redirect_uri,
-    })
-    .then(() => this.checkSync());
+    }));
     return true;
   },
   revoke() {
@@ -144,7 +143,7 @@ const GoogleDrive = BaseService.extend({
       url: 'https://www.googleapis.com/oauth2/v4/token',
       prefix: '',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': FORM_URLENCODED,
       },
       body: dumpQuery(Object.assign({}, {
         client_id: config.client_id,
@@ -191,7 +190,7 @@ const GoogleDrive = BaseService.extend({
     };
     const body = [
       `--${boundary}`,
-      'Content-Type: application/json; charset=UTF-8',
+      'Content-Type: application/json; ' + CHARSET_UTF8,
       '',
       JSON.stringify(metadata),
       `--${boundary}`,

@@ -1,7 +1,6 @@
 import { buffer2string, getUniqId, isEmpty, noop } from '@/common';
-import { extensionOrigin } from '@/common/consts';
 import { forEachEntry } from '@/common/object';
-import ua from '@/common/ua';
+import { CHROME } from './ua';
 
 let encoder;
 
@@ -16,7 +15,6 @@ export const FORBIDDEN_HEADER_RE = re`/
   sec-
 )|^(
   # whole name matches
-  user-agent|
   # https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_header_name
   # https://cs.chromium.org/?q=file:cc+symbol:IsForbiddenHeader%5Cb
   accept-(charset|encoding)|
@@ -48,11 +46,8 @@ const EXTRA_HEADERS = [
 const headersToInject = {};
 /** @param {chrome.webRequest.HttpHeader} header */
 const isVmVerify = header => header.name === VM_VERIFY;
-const isNotCookie = header => !/^cookie2?$/i.test(header.name);
-const isSendable = header => !isVmVerify(header)
-  && !(/^origin$/i.test(header.name) && header.value === extensionOrigin);
-const isSendableAnon = header => isSendable(header) && isNotCookie(header);
-const SET_COOKIE_RE = /^set-cookie2?$/i;
+export const kCookie = 'cookie';
+export const kSetCookie = 'set-cookie';
 const SET_COOKIE_VALUE_RE = re`
   /^\s*  (?:__(Secure|Host)-)?  ([^=\s]+)  \s*=\s*  (")?  ([!#-+\--:<-[\]-~]*)  \3(.*)  /x`;
 const SET_COOKIE_ATTR_RE = re`
@@ -62,9 +57,10 @@ const SAME_SITE_MAP = {
   lax: 'lax',
   none: 'no_restriction',
 };
+const kRequestHeaders = 'requestHeaders';
 const API_EVENTS = {
   onBeforeSendHeaders: [
-    onBeforeSendHeaders, 'requestHeaders', 'blocking', ...EXTRA_HEADERS,
+    onBeforeSendHeaders, kRequestHeaders, 'blocking', ...EXTRA_HEADERS,
   ],
   onHeadersReceived: [
     onHeadersReceived, kResponseHeaders, 'blocking', ...EXTRA_HEADERS,
@@ -75,20 +71,22 @@ const API_EVENTS = {
 function onHeadersReceived({ [kResponseHeaders]: headers, requestId, url }) {
   const req = requests[verify[requestId]];
   if (req) {
-    if (req.anonymous || req.storeId) {
-      headers = headers.filter(h => (
-        !SET_COOKIE_RE.test(h.name)
-        || !req.storeId
-        || setCookieInStore(h.value, req, url)
-      ));
-    }
+    // Populate responseHeaders for GM_xhr's `response`
     req[kResponseHeaders] = headers.map(encodeWebRequestHeader).join('');
-    return { [kResponseHeaders]: headers };
+    const { storeId } = req;
+    // Drop Set-Cookie headers if anonymous or using a custom storeId
+    if (!req[kSetCookie] || storeId) {
+      headers = headers.filter(h => {
+        if (h.name.toLowerCase() !== kSetCookie) return true;
+        if (storeId) setCookieInStore(h.value, storeId, url);
+      });
+      return { [kResponseHeaders]: headers };
+    }
   }
 }
 
 /** @param {chrome.webRequest.WebRequestHeadersDetails} details */
-function onBeforeSendHeaders({ requestHeaders: headers, requestId, url }) {
+function onBeforeSendHeaders({ [kRequestHeaders]: headers, requestId, url }) {
   // only the first call during a redirect/auth chain will have VM-Verify header
   const reqId = verify[requestId] || headers.find(isVmVerify)?.value;
   const req = requests[reqId];
@@ -96,52 +94,41 @@ function onBeforeSendHeaders({ requestHeaders: headers, requestId, url }) {
     verify[requestId] = reqId;
     req.coreId = requestId;
     req.url = url; // remember redirected URL with #hash as it's stripped in XHR.responseURL
-    headers = (req.noNativeCookie ? headers.filter(isNotCookie) : headers)
-    .concat(headersToInject[reqId] || [])
-    .filter(req.anonymous ? isSendableAnon : isSendable);
-  }
-  return { requestHeaders: headers };
-}
-
-/**
- * @param {string} headerValue
- * @param {GMReq.BG} req
- * @param {string} url
- */
-function setCookieInStore(headerValue, req, url) {
-  let m = SET_COOKIE_VALUE_RE.exec(headerValue);
-  if (m) {
-    const [, prefix, name, , value, optStr] = m;
-    const opt = {};
-    const isHost = prefix === 'Host';
-    SET_COOKIE_ATTR_RE.lastIndex = 0;
-    while ((m = SET_COOKIE_ATTR_RE.exec(optStr))) {
-      opt[m[1].toLowerCase()] = m[3];
+    const headersMap = {};
+    const headers2 = headersToInject[reqId];
+    const combinedHeaders = headers2 && {};
+    let name;
+    let h2 = !headers2;
+    for (const h of headers) {
+      if ((name = h.name) === VM_VERIFY
+      || (name = name.toLowerCase()) === 'origin' && h.value === extensionOrigin
+      || name === kCookie && !req[kCookie]) {
+        continue;
+      }
+      if (!h2 && name === kCookie && (h2 = headers2[name])) {
+        combinedHeaders[name] = { name, value: h.value + '; ' + h2.value };
+      } else {
+        headersMap[name] = h;
+      }
     }
-    const sameSite = opt.sameSite?.toLowerCase();
-    browser.cookies.set({
-      url,
-      name,
-      value,
-      domain: isHost ? undefined : opt.domain,
-      expirationDate: Math.max(0, +new Date(opt['max-age'] * 1000 || opt.expires)) || undefined,
-      httpOnly: 'httponly' in opt,
-      path: isHost ? '/' : opt.path,
-      sameSite: SAME_SITE_MAP[sameSite],
-      secure: url.startsWith('https:') && (!!prefix || sameSite === 'none' || 'secure' in opt),
-      storeId: req.storeId,
-    });
+    return {
+      [kRequestHeaders]: Object.values(Object.assign(headersMap, headers2, combinedHeaders))
+    };
   }
 }
 
 export function toggleHeaderInjector(reqId, headers) {
   if (headers) {
+    /* Listening even if `headers` array is empty to get the request's id.
+     * Registering just once to avoid a bug in Chrome:
+     * it adds a new internal registration even if the function reference is the same */
+    if (isEmpty(headersToInject)) {
+      API_EVENTS::forEachEntry(([name, [listener, ...options]]) => {
+        browser.webRequest[name].addListener(listener, API_FILTER, options);
+      });
+    }
     // Adding even if empty so that the toggle-off `if` runs just once even when called many times
     headersToInject[reqId] = headers;
-    // Listening even if `headers` is empty to get the request's id
-    API_EVENTS::forEachEntry(([name, [listener, ...options]]) => {
-      browser.webRequest[name].addListener(listener, API_FILTER, options);
-    });
   } else if (reqId in headersToInject) {
     delete headersToInject[reqId];
     if (isEmpty(headersToInject)) {
@@ -166,6 +153,37 @@ function encodeWebRequestHeader({ name, value, binaryValue }) {
 }
 
 /**
+ * @param {string} headerValue
+ * @param {string} storeId
+ * @param {string} url
+ */
+function setCookieInStore(headerValue, storeId, url) {
+  let m = SET_COOKIE_VALUE_RE.exec(headerValue);
+  if (m) {
+    const [, prefix, name, , value, optStr] = m;
+    const opt = {};
+    const isHost = prefix === 'Host';
+    SET_COOKIE_ATTR_RE.lastIndex = 0;
+    while ((m = SET_COOKIE_ATTR_RE.exec(optStr))) {
+      opt[m[1].toLowerCase()] = m[3];
+    }
+    const sameSite = opt.sameSite?.toLowerCase();
+    browser.cookies.set({
+      url,
+      name,
+      value,
+      domain: isHost ? undefined : opt.domain,
+      expirationDate: Math.max(0, +new Date(opt['max-age'] * 1000 || opt.expires)) || undefined,
+      httpOnly: 'httponly' in opt,
+      path: isHost ? '/' : opt.path,
+      sameSite: SAME_SITE_MAP[sameSite],
+      secure: url.startsWith('https:') && (!!prefix || sameSite === 'none' || 'secure' in opt),
+      storeId,
+    });
+  }
+}
+
+/**
  * Returns a UTF8-encoded binary string i.e. one byte per character.
  * Returns the original string in case it was already within ASCII.
  */
@@ -177,6 +195,6 @@ function string2byteString(str) {
 
 // Chrome 74-91 needs an extraHeaders listener at tab load start, https://crbug.com/1074282
 // We're attaching a no-op in non-blocking mode so it's very lightweight and fast.
-if (ua.chrome >= 74 && ua.chrome <= 91) {
+if (CHROME >= 74 && CHROME <= 91) {
   browser.webRequest.onBeforeSendHeaders.addListener(noop, API_FILTER, EXTRA_HEADERS);
 }

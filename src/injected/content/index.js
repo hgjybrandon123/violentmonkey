@@ -1,17 +1,16 @@
 import bridge, { addBackgroundHandlers, addHandlers, onScripts } from './bridge';
 import { onClipboardCopy } from './clipboard';
-import { sendSetPopup } from './gm-api-content';
 import { injectPageSandbox, injectScripts } from './inject';
 import './notifications';
 import './requests';
 import './tabs';
 import { sendCmd } from './util';
 import { isEmpty } from '../util';
-import { Run } from './cmd-run';
+import { Run, finish } from './cmd-run';
 
-const { ids } = bridge;
+const { [IDS]: ids } = bridge;
 
-// Make sure to call obj::method() in code that may run after INJECT_CONTENT userscripts
+// Make sure to call obj::method() in code that may run after CONTENT userscripts
 async function init() {
   const isXml = document instanceof XMLDocument;
   const xhrData = getXhrInjection();
@@ -20,7 +19,7 @@ async function init() {
      * in Chrome sender.url is ok, but location.href is wrong for text selection URLs #:~:text= */
     url: IS_FIREFOX && location.href,
     // XML document's appearance breaks when script elements are added
-    [INJECT_CONTENT_FORCE]: isXml,
+    [FORCE_CONTENT]: isXml,
     done: !!(xhrData || global.vmData),
   }, {
     retry: true,
@@ -32,51 +31,61 @@ async function init() {
       ? await getDataFF(dataPromise)
       : await dataPromise
   );
-  assign(ids, data.ids);
-  bridge[INJECT_INTO] = data[INJECT_INTO];
-  if (data.expose && !isXml && injectPageSandbox()) {
-    addHandlers({ GetScriptVer: true });
-    bridge.post('Expose');
-  }
+  const info = data.info;
+  const injectInto = bridge[INJECT_INTO] = data[INJECT_INTO];
+  assign(ids, data[IDS]);
   if (IS_FIREFOX && !data.clipFF) {
     off('copy', onClipboardCopy, true);
   }
-  if (data.scripts) {
+  if (IS_FIREFOX && info) { // must redefine now as it's used by injectPageSandbox
+    IS_FIREFOX = parseFloat(info.ua.browserVersion); // eslint-disable-line no-global-assign
+  }
+  if (data[EXPOSE] != null && !isXml && injectPageSandbox(data)) {
+    addHandlers({ GetScriptVer: true });
+    bridge.post('Expose', data[EXPOSE]);
+  }
+  if (objectKeys(ids).length) {
     onScripts.forEach(fn => fn(data));
-    await injectScripts(data, isXml);
+    await injectScripts(data, info, isXml);
   }
   onScripts.length = 0;
-  sendSetPopup();
+  finish(injectInto);
 }
 
 addBackgroundHandlers({
+  [VIOLENTMONKEY]: () => true,
+}, true);
+
+addBackgroundHandlers({
   Command: data => bridge.post('Command', data, ids[data.id]),
-  Run: id => Run(id, INJECT_CONTENT),
+  Run: id => Run(id, CONTENT),
   UpdatedValues(data) {
     const dataPage = createNullObj();
     const dataContent = createNullObj();
     objectKeys(data)::forEach((id) => {
-      (ids[id] === INJECT_CONTENT ? dataContent : dataPage)[id] = data[id];
+      (ids[id] === CONTENT ? dataContent : dataPage)[id] = data[id];
     });
     if (!isEmpty(dataPage)) bridge.post('UpdatedValues', dataPage);
-    if (!isEmpty(dataContent)) bridge.post('UpdatedValues', dataContent, INJECT_CONTENT);
+    if (!isEmpty(dataContent)) bridge.post('UpdatedValues', dataContent, CONTENT);
   },
 });
 
 addHandlers({
-  TabFocus: true,
-  UpdateValue: true,
+  Log: data => safeApply(logging[data[0]], logging, data[1]),
+  TabFocus: REIFY,
+  UpdateValue: REIFY,
 });
 
-init().catch(IS_FIREFOX && console.error); // Firefox can't show exceptions in content scripts
+init().catch(IS_FIREFOX && logging.error); // Firefox can't show exceptions in content scripts
 
 async function getDataFF(viaMessaging) {
-  const data = self.vmData || await SafePromise.race([
-    new SafePromise(resolve => { self.vmResolve = resolve; }),
+  // global !== window in FF content scripts
+  const data = global.vmData || await SafePromise.race([
+    new SafePromise(resolve => { global.vmResolve = resolve; }),
     viaMessaging,
   ]);
-  delete self.vmResolve;
-  delete self.vmData;
+  delete global.vmResolve;
+  delete global.vmData;
   return data;
 }
 
@@ -93,7 +102,7 @@ function getXhrInjection() {
       xhr.open('get', url, false); // `false` = synchronous
       xhr.send();
       URL.revokeObjectURL(url);
-      return JSON.parse(xhr.response);
+      return JSON.parse(xhr[kResponse]);
     }
   } catch { /* NOP */ }
 }

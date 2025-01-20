@@ -31,13 +31,21 @@ function watch() {
 }
 
 async function jsDev() {
-  require('@gera2ld/plaid-webpack/bin/develop')();
+  return runCommand('webpack-cli', ['-w', '--config', 'scripts/webpack.conf.js']);
 }
 
 async function jsProd() {
-  return require('@gera2ld/plaid-webpack/bin/build')({
-    api: true,
-    keep: true,
+  return runCommand('webpack-cli', ['--config', 'scripts/webpack.conf.js']);
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: 'inherit',
+    });
+    child.on('close', (code, signal) => {
+      (code ? reject : resolve)(signal);
+    });
   });
 }
 
@@ -88,10 +96,12 @@ async function createIcons() {
     .toFile(`${dist}/icon16${type}.png`);
   };
   return Promise.all([
-    handle(48),
     handle(128),
     ...types.map(handle16),
-    ...[19, 32, 38].flatMap(size => types.map(t => handle(size, ...t))),
+    // 32px dashboard icon (recycled) + 2xDPI browser_action desktop
+    // 38px dashboard icon (normal) + 1.5xDPI browser_action Android
+    // 48px 2xDPI browser_action Android
+    ...[32, 38, 48, 64].flatMap(size => types.map(t => handle(size, ...t))),
   ]);
 }
 
@@ -104,7 +114,7 @@ async function bump() {
   } else {
     pkg.beta = (+pkg.beta || 0) + 1;
   }
-  await fs.writeFile('package.json', JSON.stringify(pkg, null, 2), 'utf8');
+  await fs.writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n', 'utf8');
   if (process.argv.includes('--commit')) {
     const version = `v${getVersion()}`;
     spawn.sync('git', ['commit', '-am', version]);
@@ -140,6 +150,7 @@ function updateI18n() {
   .pipe(plumber(logError))
   .pipe(i18n.extract({
     base: 'src/_locales',
+    manifest: 'src/manifest.yml',
     touchedOnly: false,
     useDefaultLang: false,
     markUntouched: true,
@@ -165,8 +176,7 @@ const pack = gulp.parallel(createIcons, copyI18n, copyZip);
 
 exports.clean = clean;
 exports.manifest = manifest;
-// Making sure `manifest` finishes before its `version` is used by webpack.conf.js
-exports.dev = gulp.series(gulp.parallel(pack, jsDev), watch);
+exports.dev = gulp.parallel(gulp.series(pack, watch), jsDev);
 exports.build = gulp.series(clean, gulp.parallel(pack, jsProd));
 exports.i18n = updateI18n;
 exports.check = checkI18n;

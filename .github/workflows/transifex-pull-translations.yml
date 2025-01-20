@@ -13,9 +13,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v3
         with:
-          node-version: '16'
+          node-version: '20'
       - name: Install deps
         run: yarn
       - name: Update translations
@@ -32,4 +32,4 @@ jobs:
           body: >-
             Violentmonkey updates translations from Transifex every week automatically.
 
-            If you want to help translate into your language, please visit [the transifex platform](https://www.transifex.com/projects/p/violentmonkey-nex/resource/messagesjson/).
+            If you want to help translate into your language, please join [our transifex project](https://explore.transifex.com/violentmonkey/violentmonkey-nex/).

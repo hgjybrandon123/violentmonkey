@@ -1,5 +1,6 @@
 // eslint-disable-next-line no-restricted-imports
-export { sendCmd } from '@/common';
+import { sendMessage } from '@/common';
+
 export * from './util-task';
 
 /** When looking for documentElement, use '*' to also support XML pages
@@ -11,8 +12,11 @@ const {
 } = global;
 const { createElementNS } = document;
 const tdDecode = SafeTextDecoder[PROTO].decode;
-const getHref = describeProperty(HTMLAnchorElement[PROTO], 'href').get;
+const kTextContent = 'textContent';
+// required in FF to circumvent CSP style-src https://bugzil.la/1706787
+const setTextContent = describeProperty(Node[PROTO], kTextContent).set;
 const regexpTest = RegExp[PROTO].test; // Deeply unsafe. TODO: remove.
+const { createObjectURL } = URL;
 
 /**
  * @param {string} tag
@@ -38,19 +42,15 @@ export const onElement = (tag, cb, arg) => new SafePromise(resolve => {
 export const makeElem = (tag, attrs) => {
   const el = document::createElementNS('http://www.w3.org/1999/xhtml', tag);
   if (attrs && isString(attrs)) {
-    el::append(attrs);
+    el::setTextContent(attrs);
   } else if (attrs) {
     objectKeys(attrs)::forEach(key => {
-      if (key === 'textContent') el::append(attrs[key]);
+      if (key === kTextContent) el::setTextContent(attrs[key]);
       else el::setAttribute(key, attrs[key]);
     });
   }
   return el;
 };
-
-export const getFullUrl = url => (
-  makeElem('a', { href: url })::getHref()
-);
 
 export const decodeResource = (raw, isBlob) => {
   let res;
@@ -72,6 +72,20 @@ export const decodeResource = (raw, isBlob) => {
     res = isBlob ? bytes : new SafeTextDecoder()::tdDecode(bytes);
   }
   return isBlob
-    ? new SafeBlob([res], { type: mimeType })
+    ? createObjectURL(new SafeBlob([res], { type: mimeType }))
     : res;
 };
+
+/**
+ * Used by `injected`
+ * @param {string} cmd
+ * @param data
+ * @param {{retry?: boolean}} [options]
+ * @return {Promise}
+ */
+export const sendCmd = (cmd, data, options) => sendMessage({
+  cmd,
+  data,
+  url: location.href, // to replace MessageSender.url which doesn't change on soft navigation
+  [kTop]: topRenderMode,
+}, options);

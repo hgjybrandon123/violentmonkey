@@ -1,14 +1,17 @@
 import bridge, { addBackgroundHandlers, addHandlers } from './bridge';
+import { addNonceAttribute } from './inject';
 import { decodeResource, elemByTag, makeElem, nextTask, sendCmd } from './util';
 
 const menus = createNullObj();
 const HEAD_TAGS = ['script', 'style', 'link', 'meta'];
 const { toLowerCase } = '';
+const { [IDS]: ids } = bridge;
 let setPopupThrottle;
 let isPopupShown;
 
 addBackgroundHandlers({
-  PopupShown(state) {
+  async PopupShown(state) {
+    await bridge[REIFY];
     isPopupShown = state;
     sendSetPopup();
   },
@@ -25,10 +28,11 @@ addHandlers({
         || elemByTag('body')
         || elemByTag('*');
       el = makeElem(tag, attrs);
+      addNonceAttribute(el);
       parent::appendChild(el);
     } catch (e) {
       // A page-mode userscript can't catch DOM errors in a content script so we pass it explicitly
-      // TODO: maybe move try/catch to bridge.onHandle and use bridge.sendSync in all web commands
+      // TODO: maybe move try/catch to bridge.onHandle and use bridge.call in all web commands
       res = [`${e}`, e.stack];
     }
     bridge.post('Callback', { id: cbId, data: res }, realm, el);
@@ -39,18 +43,14 @@ addHandlers({
     return raw ? decodeResource(raw, isBlob) : true;
   },
 
-  RegisterMenu({ id, cap }) {
-    if (IS_TOP) {
-      ensureNestedProp(menus, id, cap, 1);
-      sendSetPopup(true);
-    }
+  RegisterMenu({ id, key, val }) {
+    (menus[id] || (menus[id] = createNullObj()))[key] = val;
+    sendSetPopup(true);
   },
 
-  UnregisterMenu({ id, cap }) {
-    if (IS_TOP) {
-      delete menus[id]?.[cap];
-      sendSetPopup(true);
-    }
+  UnregisterMenu({ id, key }) {
+    delete menus[id]?.[key];
+    sendSetPopup(true);
   },
 });
 
@@ -63,6 +63,10 @@ export async function sendSetPopup(isDelayed) {
       await setPopupThrottle;
       setPopupThrottle = null;
     }
-    sendCmd('SetPopup', safePickInto({ menus }, bridge, ['ids', INJECT_INTO]));
+    await sendCmd('SetPopup', {
+      [IDS]: ids,
+      [INJECT_INTO]: bridge[INJECT_INTO],
+      menus,
+    });
   }
 }

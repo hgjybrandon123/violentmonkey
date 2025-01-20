@@ -1,36 +1,29 @@
 const handlers = createNullObj();
 export const addHandlers = obj => assign(handlers, obj);
-const callbacks = {
-  __proto__: null,
-  Error(err) {
-    throw err;
-  },
-};
+export const callbacks = createNullObj();
 /**
- * @property {VMScriptGMInfoPlatform} ua
- * @property {VMBridgePostFunc} post
+ * @mixes VMInjection.Info
+ * @property {VMBridgePostFunc} post - synchronous
  * @property {VMBridgeMode} mode
  */
 const bridge = {
   __proto__: null,
-  callbacks,
   onHandle({ cmd, data, node }) {
     const fn = handlers[cmd];
     if (fn) node::fn(data);
   },
-  send(cmd, data, node) {
+  /** @return {Promise} asynchronous */
+  promise(cmd, data, node) {
     let cb;
     let res;
-    try {
-      res = new UnsafePromise(resolve => {
-        cb = resolve;
-      });
-    } catch (e) {
-      // Unavoidable since vault's Promise can't be used after the iframe is removed
-    }
+    res = new SafePromise(resolve => {
+      cb = resolve;
+    });
+    if (IS_FIREFOX) setPrototypeOf(res, SafePromiseConstructor);
     postWithCallback(cmd, data, node, cb);
     return res;
   },
+  /** @return {?} synchronous */
   call: postWithCallback,
 };
 

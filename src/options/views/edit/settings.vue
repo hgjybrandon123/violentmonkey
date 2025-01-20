@@ -1,20 +1,21 @@
 <template>
-  <div class="edit-settings" ref="container">
+  <div class="edit-settings">
     <h4 v-text="i18n('editLabelSettings')"></h4>
-    <div class="form-group condensed">
+    <div class="mb-2">
       <label>
-        <input type="checkbox" v-model="config.shouldUpdate">
-        <span v-text="i18n('labelAllowUpdate')"></span>
-      </label>
-      <span v-text="i18n('labelNotifyThisUpdated')"/>
-      <label class="ml-1" :key="value" v-for="([text, value]) of [
-        [i18n('genericOn'), '1'],
-        [i18n('genericOff'), '0'],
-        [i18n('genericUseGlobal'), ''],
-      ]"><!-- make sure to place the input and span on one line with a space between -->
-        <input type="radio" :value="value" v-model="config.notifyUpdates"> <span v-text="text"/>
+        <input type="checkbox" v-model="config.enabled">
+        <span v-text="i18n('buttonEnable')"/>
       </label>
     </div>
+    <VMSettingsUpdate v-bind="{script}"/>
+    <table>
+      <tr>
+        <td v-text="i18n('labelTags')"></td>
+        <td>
+          <input type="text" v-model="custom.tags" :disabled="readOnly">
+        </td>
+      </tr>
+    </table>
     <h4 v-text="i18n('editLabelMeta')"></h4>
     <!-- Using tables to auto-adjust width, which differs substantially between languages -->
     <table>
@@ -26,7 +27,7 @@
           <p v-text="i18n('labelRunAt')"/>
         </td>
         <td>
-          <select v-model="custom.runAt">
+          <select v-model="custom.runAt" :disabled="readOnly">
             <option value="" v-text="i18n('labelRunAtDefault')"></option>
             <option value="document-start">document-start</option>
             <option value="document-body">document-body</option>
@@ -43,10 +44,24 @@
           <p v-text="i18n('labelNoFrames')"/>
         </td>
         <td>
-          <select v-model="custom.noframes">
+          <select v-model="custom.noframes" :disabled="readOnly">
             <option value="" v-text="i18n('labelRunAtDefault')"/>
             <option value="0" v-text="i18n('genericOn')"/>
             <option value="1" v-text="i18n('genericOff')"/>
+          </select>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <code>@inject-into</code>
+        </td>
+        <td>
+          <p v-text="i18n('labelInjectionMode')"/>
+        </td>
+        <td>
+          <select v-model="custom.injectInto" :disabled="readOnly">
+            <option value="" v-text="i18n('labelRunAtDefault')"/>
+            <option v-for="(_, mode) in KII" :key="mode" v-text="mode" />
           </select>
         </td>
       </tr>
@@ -58,7 +73,7 @@
           <p v-text="label"/>
         </td>
         <td>
-          <input type="text" v-model="custom[name]" :placeholder="placeholders[name]">
+          <input type="text" v-model="custom[name]" :placeholder="placeholders[name]" :disabled="readOnly">
         </td>
       </tr>
     </table>
@@ -71,67 +86,61 @@
             <span v-text="labelB"/>
           </p>
           <label>
-            <input type="checkbox" v-model="custom[orig]">
+            <input type="checkbox" v-model="custom[orig]" :disabled="readOnly">
             <span v-text="i18n('labelKeepOriginal')"/>
           </label>
         </td>
         <td>
-          <textarea v-model="custom[name]" spellcheck="false" :rows="calcRows(custom[name])"/>
+          <textarea v-model="custom[name]" spellcheck="false" :rows="calcRows(custom[name])" :disabled="readOnly" />
         </td>
       </tr>
     </table>
   </div>
 </template>
 
-<script>
+<script setup>
+import { computed, shallowRef } from 'vue';
 import { getScriptHome, i18n } from '@/common';
-import { objectGet } from '@/common/object';
+import { KNOWN_INJECT_INTO } from '@/common/consts';
+import { objectPick } from '@/common/object';
+import VMSettingsUpdate from './settings-update';
+import {
+  kDownloadURL, kExclude, kExcludeMatch, kHomepageURL, kIcon, kInclude, kMatch, kName, kOrigExclude,
+  kOrigExcludeMatch, kOrigInclude, kOrigMatch, kUpdateURL,
+} from '../../utils';
+
+const props = defineProps({
+  script: Object,
+  readOnly: Boolean,
+});
+const KII = shallowRef(KNOWN_INJECT_INTO);
 
 const highlightMetaKeys = str => str.match(/^(.*?)(@[-a-z]+)(.*)/)?.slice(1) || [str, '', ''];
-
-export default {
-  props: ['active', 'settings', 'value'],
-  computed: {
-    custom() {
-      return this.settings.custom || {};
-    },
-    config() {
-      return this.settings.config || {};
-    },
-    placeholders() {
-      const { value } = this;
-      return {
-        name: objectGet(value, 'meta.name'),
-        homepageURL: getScriptHome(value),
-        updateURL: objectGet(value, 'meta.updateURL') || i18n('hintUseDownloadURL'),
-        downloadURL: objectGet(value, 'meta.downloadURL') || objectGet(value, 'custom.lastInstallURL'),
-      };
-    },
-    textInputs() {
-      return [
-        ['name', i18n('labelName')],
-        ['homepageURL', i18n('labelHomepageURL')],
-        ['updateURL', i18n('labelUpdateURL')],
-        ['downloadURL', i18n('labelDownloadURL')],
-      ];
-    },
-    textAreas() {
-      return [
-        ['include', 'origInclude', ...highlightMetaKeys(i18n('labelInclude'))],
-        ['match', 'origMatch', ...highlightMetaKeys(i18n('labelMatch'))],
-        ['exclude', 'origExclude', ...highlightMetaKeys(i18n('labelExclude'))],
-        ['excludeMatch', 'origExcludeMatch', ...highlightMetaKeys(i18n('labelExcludeMatch'))],
-      ];
-    },
-  },
-  watch: {
-    active(val) {
-      if (val) {
-        this.$refs.container.querySelector('input').focus();
-      }
-    },
-  },
-};
+const config = computed(() => props.script.config);
+const custom = computed(() => props.script.custom);
+const placeholders = computed(() => {
+  const { script } = props;
+  const { meta } = script;
+  return {
+    ...objectPick(meta, [kIcon, kName]),
+    [kHomepageURL]: getScriptHome(script),
+    [kUpdateURL]: meta[kUpdateURL] || i18n('hintUseDownloadURL'),
+    [kDownloadURL]: meta[kDownloadURL] || script.custom.lastInstallURL,
+  };
+});
+const textInputs = [
+  [kName, i18n('labelName')],
+  [kHomepageURL, i18n('labelHomepageURL')],
+  [kUpdateURL, i18n('labelUpdateURL')],
+  [kDownloadURL, i18n('labelDownloadURL')],
+  [kIcon, i18n('labelIconURL')],
+];
+const textAreas = [
+  [kInclude, kOrigInclude, ...highlightMetaKeys(i18n('labelInclude'))],
+  [kMatch, kOrigMatch, ...highlightMetaKeys(i18n('labelMatch'))],
+  [kExclude, kOrigExclude, ...highlightMetaKeys(i18n('labelExclude'))],
+  [kExcludeMatch, kOrigExcludeMatch, ...highlightMetaKeys(i18n('labelExcludeMatch'))],
+];
 </script>
 
 <style>
@@ -178,6 +187,11 @@ $leftColWidth: 12rem;
   code {
     background: none;
     font-weight: bold;
+  }
+  svg {
+    width: 16px;
+    height: 16px;
+    vertical-align: text-bottom;
   }
 }
 </style>

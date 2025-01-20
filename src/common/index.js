@@ -1,10 +1,8 @@
 // SAFETY WARNING! Exports used by `injected` must make ::safe() calls and use __proto__:null
 
-import {
-  browser, extensionRoot, HOMEPAGE_URL, ICON_PREFIX, INFERRED, SUPPORT_URL,
-} from '@/common/consts';
+import { browser, HOMEPAGE_URL, INFERRED, RUN_AT_RE, SUPPORT_URL } from './consts';
 import { deepCopy } from './object';
-import { blob2base64, i18n, isDataUri } from './util';
+import { blob2base64, i18n, isDataUri, tryUrl } from './util';
 
 export { normalizeKeys } from './object';
 export * from './util';
@@ -19,35 +17,32 @@ if (process.env.DEV && process.env.IS_INJECTED !== 'injected-web') {
   }
 }
 
-export const defaultImage = `${ICON_PREFIX}128.png`;
+export const ignoreChromeErrors = () => chrome.runtime.lastError;
+export const browserWindows = !process.env.IS_INJECTED && browser.windows;
+export const defaultImage = !process.env.IS_INJECTED && `${ICON_PREFIX}128.png`;
+/** @return {'0' | '1' | ''} treating source as abstract truthy/falsy to ensure consistent result */
+export const nullBool2string = v => v ? '1' : v == null ? '' : '0';
 /** Will be encoded to avoid splitting the URL in devtools UI */
 const BAD_URL_CHAR = /[#/?]/g;
 /** Fullwidth range starts at 0xFF00, normal range starts at space char code 0x20 */
 const replaceWithFullWidthForm = s => String.fromCharCode(s.charCodeAt(0) - 0x20 + 0xFF00);
-const PORT_ERROR_RE = /(Receiving end does not exist)|The message port closed before|$/;
+const PORT_ERROR_RE = /(Receiving end does not exist)|The message port closed before|moved into back\/forward cache|$/;
 
 export function initHooks() {
-  const hooks = [];
-
-  function fire(data) {
-    hooks.slice().forEach((cb) => {
-      cb(data);
-    });
-  }
-
-  function hook(callback) {
-    hooks.push(callback);
-    return () => {
-      const i = hooks.indexOf(callback);
-      if (i >= 0) hooks.splice(i, 1);
-    };
-  }
-
-  return { hook, fire };
+  const hooks = new Set();
+  return {
+    hook(cb) {
+      hooks.add(cb);
+      return () => hooks.delete(cb);
+    },
+    fire(...data) {
+      // Set#forEach correctly iterates the remainder even if current callback unhooks itself
+      hooks.forEach(cb => cb(...data));
+    },
+  };
 }
 
 /**
- * Used by `injected`
  * @param {string} cmd
  * @param data
  * @param {{retry?: boolean}} [options]
@@ -78,7 +73,7 @@ const COMMANDS_WITH_SRC = [
   'SetPopup',
 */
 ];
-const getBgPage = () => browser.extension.getBackgroundPage?.();
+export const getBgPage = () => browser.extension.getBackgroundPage?.();
 
 /**
  * Sends the command+data directly so it's synchronous and faster than sendCmd thanks to deepCopy.
@@ -101,7 +96,7 @@ export function sendCmdDirectly(cmd, data, options, fakeSrc) {
  * @param {number} tabId
  * @param {string} cmd
  * @param data
- * @param {{frameId?: number}} [options]
+ * @param {VMMessageTargetFrame} [options]
  * @return {Promise}
  */
 export function sendTabCmd(tabId, cmd, data, options) {
@@ -156,14 +151,36 @@ export function leftpad(input, length, pad = '0') {
 }
 
 /**
+ * @param {string} browserLang  Language tags from RFC5646 (`[lang]-[script]-[region]-[variant]`, all parts are optional)
+ * @param {string} locale  `<lang>`, `<lang>-<region>`
+ */
+function localeMatch(browserLang, metaLocale) {
+  const bParts = browserLang.toLowerCase().split('-');
+  const mParts = metaLocale.toLowerCase().split('-');
+  let bi = 0;
+  let mi = 0;
+  while (bi < bParts.length && mi < mParts.length) {
+    if (bParts[bi] === mParts[mi]) mi += 1;
+    bi += 1;
+  }
+  return mi === mParts.length;
+}
+
+/**
  * Get locale attributes such as `@name:zh-CN`
  */
-export function getLocaleString(meta, key) {
-  const localeMeta = navigator.languages
-  // Use `lang.toLowerCase()` since v2.6.5
-  .map(lang => meta[`${key}:${lang}`] || meta[`${key}:${lang.toLowerCase()}`])
-  .find(Boolean);
-  return localeMeta || meta[key] || '';
+export function getLocaleString(meta, key, languages = navigator.languages) {
+  // zh, zh-cn, zh-tw
+  const mls = Object.keys(meta)
+    .filter(metaKey => metaKey.startsWith(key + ':'))
+    .map(metaKey => metaKey.slice(key.length + 1))
+    .sort((a, b) => b.length - a.length);
+  let bestLocale;
+  for (const lang of languages) {
+    bestLocale = mls.find(ml => localeMatch(lang, ml));
+    if (bestLocale) break;
+  }
+  return meta[bestLocale ? `${key}:${bestLocale}` : key] || '';
 }
 
 /**
@@ -171,13 +188,14 @@ export function getLocaleString(meta, key) {
  * @returns {string | undefined}
  */
 export function getScriptHome(script) {
-  let meta;
-  return script.custom[HOMEPAGE_URL]
+  let custom, meta;
+  return (custom = script.custom)[HOMEPAGE_URL]
     || (meta = script.meta)[HOMEPAGE_URL]
     || script[INFERRED]?.[HOMEPAGE_URL]
     || meta.homepage
     || meta.website
-    || meta.source;
+    || meta.source
+    || custom.from;
 }
 
 /**
@@ -188,9 +206,26 @@ export function getScriptSupportUrl(script) {
   return script.meta[SUPPORT_URL] || script[INFERRED]?.[SUPPORT_URL];
 }
 
+/**
+ * @param {VMScript} script
+ * @returns {string}
+ */
+export function getScriptIcon(script) {
+  return script.custom.icon || script.meta.icon;
+}
+
+/**
+ * @param {VMScript} script
+ * @returns {string}
+ */
 export function getScriptName(script) {
   return script.custom.name || getLocaleString(script.meta, 'name')
     || `#${script.props.id ?? i18n('labelNoName')}`;
+}
+
+/** @returns {VMInjection.RunAt} without "document-" */
+export function getScriptRunAt(script) {
+  return `${script.custom[RUN_AT] || script.meta[RUN_AT] || ''}`.match(RUN_AT_RE)?.[1] || 'end';
 }
 
 /** URL that shows the name of the script and opens in devtools sources or in our editor */
@@ -210,14 +245,21 @@ export function getScriptPrettyUrl(script, displayName) {
 
 /**
  * @param {VMScript} script
- * @param {boolean} [all] - to return all two urls (1: check, 2: download)
- * @return {Array<string>|string|void}
+ * @param {Object} [opts]
+ * @param {boolean} [opts.all] - to return all two urls [checkUrl, downloadUrl]
+ * @param {boolean} [opts.allowedOnly] - check shouldUpdate
+ * @param {boolean} [opts.enabledOnly]
+ * @return {string[] | string}
  */
-export function getScriptUpdateUrl(script, all) {
-  if (script.config.shouldUpdate) {
+export function getScriptUpdateUrl(script, { all, allowedOnly, enabledOnly } = {}) {
+  if ((!allowedOnly || script.config.shouldUpdate)
+  && (!enabledOnly || script.config.enabled)) {
     const { custom, meta } = script;
-    const downloadURL = custom.downloadURL || meta.downloadURL || custom.lastInstallURL;
-    const updateURL = custom.updateURL || meta.updateURL || downloadURL;
+    /* URL in meta may be set to an invalid value to enforce disabling of the automatic updates
+     * e.g. GreasyFork sets it to `none` when the user installs an old version.
+     * We'll show such script as non-updatable. */
+    const downloadURL = tryUrl(custom.downloadURL || meta.downloadURL || custom.lastInstallURL);
+    const updateURL = tryUrl(custom.updateURL || meta.updateURL || downloadURL);
     const url = downloadURL || updateURL;
     if (url) return all ? [downloadURL, updateURL] : url;
   }
@@ -230,13 +272,6 @@ export function getFullUrl(url, base) {
   } catch (e) {
     return `data:,${e.message} ${url}`;
   }
-  // Use protocol whitelist to filter URLs
-  if (![
-    'http:',
-    'https:',
-    'ftp:',
-    'data:',
-  ].includes(obj.protocol)) obj.protocol = 'http:';
   return obj.href;
 }
 
@@ -253,17 +288,17 @@ export function decodeFilename(filename) {
   return filename.replace(/-([0-9a-f]{2})/g, (_m, g) => String.fromCharCode(parseInt(g, 16)));
 }
 
-export async function getActiveTab() {
+export async function getActiveTab(windowId = -2 /*chrome.windows.WINDOW_ID_CURRENT*/) {
   return (
     await browser.tabs.query({
       active: true,
-      currentWindow: true,
+      [kWindowId]: windowId,
     })
-  )[0] || (
+  )[0] || browserWindows && (
     // Chrome bug workaround when an undocked devtools window is focused
     await browser.tabs.query({
       active: true,
-      windowId: (await browser.windows.getCurrent()).id,
+      [kWindowId]: (await browserWindows.getCurrent()).id,
     })
   )[0];
 }
@@ -279,8 +314,8 @@ export function trueJoin(separator) {
 }
 
 /**
- * @param {string} url
  * @param {string} raw - raw value in storage.cache
+ * @param {string} [url]
  * @returns {?string}
  */
 export function makeDataUri(raw, url) {
@@ -295,11 +330,24 @@ export function makeDataUri(raw, url) {
 
 /**
  * @param {VMReq.Response} response
- * @param {boolean} [noJoin]
- * @returns {string|string[]}
+ * @returns {Promise<string>}
  */
-export async function makeRaw(response, noJoin) {
+export async function makeRaw(response) {
   const type = (response.headers.get('content-type') || '').split(';')[0] || '';
   const body = await blob2base64(response.data);
-  return noJoin ? [type, body] : `${type},${body}`;
+  return `${type},${body}`;
+}
+
+export function loadQuery(string) {
+  const res = {};
+  if (string) {
+    new URLSearchParams(string).forEach((val, key) => {
+      res[key] = val;
+    });
+  }
+  return res;
+}
+
+export function dumpQuery(dict) {
+  return `${new URLSearchParams(dict)}`;
 }

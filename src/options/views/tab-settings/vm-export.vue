@@ -4,23 +4,19 @@
       <button v-text="i18n('buttonExportData')" @click="handleExport" :disabled="exporting"/>
       <setting-text name="exportNameTemplate" ref="tpl" has-reset :has-save="false" :rows="1"
                     class="tpl flex flex-1 center-items ml-1c"/>
-      <tooltip :content="i18n('msgDateFormatInfo', dateTokens)" placement="left">
-        <a href="https://momentjs.com/docs/#/displaying/format/" target="_blank">
-          <icon name="info"/>
-        </a>
-      </tooltip>
-      <span hidden v-text="getFileName()"/>
+      <vm-date-info/>
+      <span hidden v-text="fileName"/>
     </div>
     <div class="mt-1">
       <setting-check name="exportValues" :label="i18n('labelExportScriptData')" />
     </div>
     <modal
-      v-if="store.ffDownload"
+      v-if="ffDownload"
       transition="in-out"
-      :visible="!!store.ffDownload.url"
-      @close="store.ffDownload = {}">
+      :show="!!ffDownload.url"
+      @close="ffDownload = {}">
       <div class="modal-content">
-        <a :download="store.ffDownload.name" :href="store.ffDownload.url">
+        <a :download="ffDownload.name" :href="ffDownload.url">
           Right click and save as<br />
           <strong>scripts.zip</strong>
         </a>
@@ -29,76 +25,59 @@
   </div>
 </template>
 
-<script>
+<script setup>
+import { computed, ref } from 'vue';
 import Modal from 'vueleton/lib/modal';
-import Tooltip from 'vueleton/lib/tooltip';
-import Icon from '@/common/ui/icon';
 import { getScriptName, sendCmdDirectly } from '@/common';
-import { formatDate, DATE_FMT } from '@/common/date';
+import { formatDate } from '@/common/date';
 import { objectGet } from '@/common/object';
 import options from '@/common/options';
-import ua from '@/common/ua';
 import SettingCheck from '@/common/ui/setting-check';
 import SettingText from '@/common/ui/setting-text';
 import { downloadBlob } from '@/common/download';
 import loadZip from '@/common/zip';
-import { store } from '../../utils';
+import VmDateInfo from './vm-date-info';
 
-/**
- * Note:
- * - Firefox does not support multiline <select>
- */
-if (IS_FIREFOX) store.ffDownload = {};
+/** @type {VMScriptGMInfoPlatform} */
+let ua;
 
-export default {
-  components: {
-    SettingCheck,
-    SettingText,
-    Icon,
-    Modal,
-    Tooltip,
-  },
-  data() {
-    return {
-      store,
-      dateTokens: Object.keys(DATE_FMT).join(', '),
-      exporting: false,
-    };
-  },
-  methods: {
-    async handleExport() {
-      try {
-        this.exporting = true;
-        download(await exportData(), this.getFileName());
-      } finally {
-        this.exporting = false;
-      }
-    },
-    getFileName() {
-      const { tpl } = this.$refs;
-      return tpl && `${formatDate(tpl.value?.trim() || tpl.defaultValue)}.zip`;
-    },
-  },
-};
+const tpl = ref();
+const exporting = ref(false);
+const ffDownload = ref(IS_FIREFOX && {});
+const fileName = computed(() => {
+  const tplComp = tpl.value;
+  return tplComp && `${formatDate(tplComp.text.trim() || tplComp.defaultValue)}.zip`;
+});
 
-function download(blob, fileName) {
+async function handleExport() {
+  try {
+    exporting.value = true;
+    if (IS_FIREFOX && !ua) ua = await sendCmdDirectly('UA');
+    download(await exportData());
+  } finally {
+    exporting.value = false;
+  }
+}
+
+function download(blob) {
   /* Old FF can't download blobs https://bugzil.la/1420419, fixed by enabling OOP:
    * v56 in Windows https://bugzil.la/1357486
    * v61 in MacOS https://bugzil.la/1385403
    * v63 in Linux https://bugzil.la/1357487 */
-  const FF = ua.firefox;
-  // eslint-disable-next-line no-nested-ternary
+  // TODO: remove when strict_min_version >= 63
+  const FF = IS_FIREFOX && parseFloat(ua.browserVersion);
+  const name = fileName.value;
   if (FF && (ua.os === 'win' ? FF < 56 : ua.os === 'mac' ? FF < 61 : FF < 63)) {
     const reader = new FileReader();
     reader.onload = () => {
-      store.ffDownload = {
-        name: fileName,
+      ffDownload.value = {
+        name,
         url: reader.result,
       };
     };
     reader.readAsDataURL(blob);
   } else {
-    downloadBlob(blob, fileName);
+    downloadBlob(blob, name);
   }
 }
 
@@ -147,7 +126,7 @@ async function exportData() {
   });
   files.push({
     name: 'violentmonkey',
-    content: JSON.stringify(vm),
+    content: JSON.stringify(vm, null, 2), // prettify to help users diff or view it
   });
   const zip = await loadZip();
   const blobWriter = new zip.BlobWriter('application/zip');
@@ -164,11 +143,6 @@ async function exportData() {
 .export {
   .modal-content {
     width: 13rem;
-  }
-  .icon {
-    width: 16px;
-    height: 16px;
-    fill: var(--fg);
   }
   .tpl {
     max-width: 30em;
